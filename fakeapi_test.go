@@ -211,6 +211,9 @@ type partRecord struct {
 	etag string
 	hash [32]byte
 	size int64
+	// viaAPI is true for a part sent through the API: only those are in the job's own part list, so a
+	// complete without a body assembles them and nothing a direct PUT stored.
+	viaAPI bool
 }
 
 func newFakeAPI(t *testing.T, clock Clock) *fakeAPI {
@@ -246,20 +249,6 @@ func (f *fakeAPI) count(route string) int {
 	n := 0
 	for i := range f.log {
 		if f.log[i].route == route {
-			n++
-		}
-	}
-	return n
-}
-
-// totalExceptParts counts every request but the part uploads, which can still arrive from an
-// earlier, cancelled run after its call has returned.
-func (f *fakeAPI) totalExceptParts() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	n := 0
-	for i := range f.log {
-		if r := f.log[i].route; r != "r2" && r != "part" {
 			n++
 		}
 	}
@@ -478,7 +467,7 @@ func (f *fakeAPI) storePart(w http.ResponseWriter, r *http.Request, route string
 			f.mu.Unlock()
 		}
 	}
-	record := partRecord{etag: fmt.Sprintf("etag-%d", n), size: read}
+	record := partRecord{etag: fmt.Sprintf("etag-%d", n), size: read, viaAPI: route == "part"}
 	copy(record.hash[:], sum)
 	f.mu.Lock()
 	f.parts[n] = record
@@ -504,6 +493,15 @@ func (f *fakeAPI) complete(w http.ResponseWriter, rec seen) {
 	f.mu.Lock()
 	total := f.totalParts(f.size)
 	complete := len(f.parts) == total
+	if len(rec.body) == 0 {
+		viaAPI := 0
+		for _, part := range f.parts {
+			if part.viaAPI {
+				viaAPI++
+			}
+		}
+		complete = viaAPI == total
+	}
 	f.mu.Unlock()
 	if len(body.Parts) > 0 {
 		sorted := sort.SliceIsSorted(body.Parts, func(i, j int) bool { return body.Parts[i].N < body.Parts[j].N })

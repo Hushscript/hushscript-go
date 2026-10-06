@@ -22,7 +22,6 @@ type ErrorKind int
 const (
 	KindAPI ErrorKind = iota
 	KindConfiguration
-	KindPreflight
 	KindUnsupportedMedia
 	KindFileLimit
 	KindDailyLimit
@@ -41,6 +40,8 @@ const (
 	KindAbort
 	KindNetwork
 	KindOutcomeUnknown
+	// KindPreflight is last so that the values of the kinds released before it do not move.
+	KindPreflight
 )
 
 var kindNames = map[ErrorKind]string{
@@ -79,7 +80,7 @@ func (k ErrorKind) String() string {
 // request that holds credit, so no hold was placed. KindPreflight itself is the family's base,
 // raised for an invalid option.
 func (k ErrorKind) IsPreflight() bool {
-	return k >= KindPreflight && k <= KindResumeMismatch
+	return k == KindPreflight || (k >= KindUnsupportedMedia && k <= KindResumeMismatch)
 }
 
 // IsAPI reports whether the kind is an answer from the API: ApiError and its subclasses.

@@ -22,8 +22,6 @@ const (
 	proxiedPartBytes = 32 << 20
 	// urlMaxAge: presigned URLs live 24 h, so a page older than this is fetched again.
 	urlMaxAge = 23 * time.Hour
-	// bodyReleaseWait bounds how long a part buffer waits for the transport to let go of it.
-	bodyReleaseWait = time.Second
 )
 
 // uploadPlan is the direct-to-R2 plan of a create response; nil stands for a proxied job.
@@ -86,7 +84,7 @@ func (r *run) sendAndComplete(ctx context.Context, plan *uploadPlan) (string, er
 			Parts []completedPart `json:"parts"`
 		}{acks})
 		if marshalErr != nil {
-			return "", newSDKError(KindUpload, "upload_failed", "The complete request could not be built.", marshalErr, c.cfg.redactor(), hintInputs{})
+			return "", c.requestNotBuilt(marshalErr)
 		}
 		body = bytes.NewReader(encoded)
 	} else {
@@ -96,15 +94,22 @@ func (r *run) sendAndComplete(ctx context.Context, plan *uploadPlan) (string, er
 			return nil
 		})
 	}
+	const route = "POST /v1/uploads/{job}/complete"
 	response, err := c.api.CompleteUploadWithBodyWithResponse(ctx, r.state.JobID, "application/json", body, editors...)
 	if err != nil {
-		return "", err
+		return "", c.readFailed(err, route)
 	}
-	if response.JSON200 == nil {
-		return "", c.badResponse("POST /v1/uploads/{job}/complete")
+	if failure := c.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "state"); failure != nil {
+		return "", failure
 	}
 	return response.JSON200.State, nil
 }
+
+const (
+	modeUndecided uint32 = iota
+	modeDirect
+	modeProxied
+)
 
 // uploader sends the parts of one job with at most `workers` in flight.
 type uploader struct {
@@ -117,9 +122,12 @@ type uploader struct {
 	workers  int
 	report   func(int64)
 
-	pages    *partPages // nil for a proxied job
-	proxied  atomic.Bool
-	directOK atomic.Bool
+	pages *partPages // nil for a proxied job
+	// mode is how the job's parts travel. It starts undecided and is settled once, by a
+	// compare-and-swap: to modeDirect by the first direct PUT that succeeds, to modeProxied by the
+	// first fallback. Whichever wins, the other can never happen, so the complete call is built
+	// from exactly the parts that went the settled way.
+	mode     atomic.Uint32
 	nextPart atomic.Int64
 
 	mu    sync.Mutex
@@ -147,7 +155,7 @@ func (c *core) newUploader(r *run, plan *uploadPlan) (*uploader, error) {
 	if plan != nil {
 		u.pages = newPartPages(c, u.job, plan)
 	} else {
-		u.proxied.Store(true)
+		u.mode.Store(modeProxied)
 	}
 	var sentMu sync.Mutex
 	var sent int64
@@ -193,7 +201,7 @@ func (u *uploader) send(parent context.Context) ([]completedPart, error) {
 	if err := u.src.checkNoMoreBytes(u.red); err != nil {
 		return nil, err
 	}
-	if u.proxied.Load() {
+	if u.isProxied() {
 		return nil, nil
 	}
 	acks := make([]completedPart, 0, len(u.etags))
@@ -224,12 +232,11 @@ func (u *uploader) worker(ctx context.Context) error {
 			return err
 		}
 		hold := &bodyHold{}
-		err := u.sendPart(ctx, n, data, hold)
-		if !hold.released() {
-			buf = nil // the transport still holds it: never write into it again
-		}
-		if err != nil {
+		if err := u.sendPart(ctx, n, data, hold); err != nil {
 			return err
+		}
+		if !hold.wait(ctx) {
+			buf = nil // cancelled while the transport still holds it: never write into it again
 		}
 		u.report(length)
 	}
@@ -238,20 +245,46 @@ func (u *uploader) worker(ctx context.Context) error {
 // bodyHold tracks the request bodies made from one part buffer, so the buffer is rewritten only after
 // the transport has closed every one of them (a transport may still be reading after it answered).
 type bodyHold struct {
-	open sync.WaitGroup
+	mu      sync.Mutex
+	open    int
+	changed chan struct{} // closed on the next release; nil while nobody waits
 }
 
-func (h *bodyHold) released() bool {
-	done := make(chan struct{})
-	go func() {
-		h.open.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return true
-	case <-time.After(bodyReleaseWait):
-		return false
+func (h *bodyHold) acquire() {
+	h.mu.Lock()
+	h.open++
+	h.mu.Unlock()
+}
+
+func (h *bodyHold) release() {
+	h.mu.Lock()
+	h.open--
+	if h.changed != nil {
+		close(h.changed)
+		h.changed = nil
+	}
+	h.mu.Unlock()
+}
+
+// wait blocks until every body has been closed, however long the transport takes, and reports true.
+// It reports false only when ctx ends first.
+func (h *bodyHold) wait(ctx context.Context) bool {
+	for {
+		h.mu.Lock()
+		if h.open == 0 {
+			h.mu.Unlock()
+			return true
+		}
+		if h.changed == nil {
+			h.changed = make(chan struct{})
+		}
+		changed := h.changed
+		h.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return false
+		}
 	}
 }
 
@@ -262,7 +295,7 @@ type heldBody struct {
 }
 
 func (b *heldBody) Close() error {
-	b.once.Do(b.hold.open.Done)
+	b.once.Do(b.hold.release)
 	return nil
 }
 
@@ -275,7 +308,7 @@ func partRequest(ctx context.Context, target string, data []byte, hold *bodyHold
 	}
 	req.ContentLength = int64(len(data))
 	req.GetBody = func() (io.ReadCloser, error) {
-		hold.open.Add(1)
+		hold.acquire()
 		return &heldBody{Reader: bytes.NewReader(data), hold: hold}, nil
 	}
 	req.Body = http.NoBody
@@ -285,15 +318,12 @@ func partRequest(ctx context.Context, target string, data []byte, hold *bodyHold
 // sendPart sends one part: direct first, with the fallback rules of spec 8.4, then through the API
 // when the job went proxied.
 func (u *uploader) sendPart(ctx context.Context, n int, data []byte, hold *bodyHold) error {
-	if !u.proxied.Load() {
+	if !u.isProxied() {
 		if err := u.sendDirect(ctx, n, data, hold); err != nil {
 			return err
 		}
 	}
-	if u.proxied.Load() {
-		u.mu.Lock()
-		delete(u.etags, n)
-		u.mu.Unlock()
+	if u.isProxied() {
 		return u.putProxied(ctx, n, data, hold)
 	}
 	return nil
@@ -303,7 +333,7 @@ type directState struct{ refetched bool }
 
 func (u *uploader) sendDirect(ctx context.Context, n int, data []byte, hold *bodyHold) error {
 	state := &directState{}
-	for !u.proxied.Load() && u.pages != nil {
+	for !u.isProxied() && u.pages != nil {
 		target, direct, err := u.pages.urlFor(ctx, n)
 		if err != nil {
 			if recovered := u.recover(ctx, err, n, "", state); recovered != nil {
@@ -312,21 +342,21 @@ func (u *uploader) sendDirect(ctx context.Context, n int, data []byte, hold *bod
 			continue
 		}
 		if !direct {
-			if u.directOK.Load() {
+			if !u.fallBack(n) {
 				return u.partURLMissing(n)
 			}
-			u.proxied.Store(true)
 			return nil
 		}
 		etag, err := u.putDirect(ctx, n, target, data, hold)
 		if err == nil {
-			if u.proxied.Load() {
-				return nil
+			u.trace("direct-success", n)
+			if !u.settleDirect() {
+				return nil // the job went proxied first: sendPart sends this part through the API again
 			}
-			u.directOK.Store(true)
 			u.mu.Lock()
 			u.etags[n] = etag
 			u.mu.Unlock()
+			u.trace("direct-done", n)
 			return nil
 		}
 		if recovered := u.recover(ctx, err, n, target, state); recovered != nil {
@@ -334,6 +364,29 @@ func (u *uploader) sendDirect(ctx context.Context, n int, data []byte, hold *bod
 		}
 	}
 	return nil
+}
+
+func (u *uploader) isProxied() bool { return u.mode.Load() == modeProxied }
+
+func (u *uploader) isDirect() bool { return u.mode.Load() == modeDirect }
+
+// settleDirect records a successful direct PUT. It reports false when the job already went proxied.
+func (u *uploader) settleDirect() bool {
+	return u.mode.CompareAndSwap(modeUndecided, modeDirect) || u.isDirect()
+}
+
+// fallBack moves an undecided job to proxied parts and reports true; it reports false when a direct
+// PUT has already succeeded, which rules the fallback out (spec 8.4). It is true as well when
+// another part already did the move.
+func (u *uploader) fallBack(n int) bool {
+	u.trace("fallback", n)
+	return u.mode.CompareAndSwap(modeUndecided, modeProxied) || u.isProxied()
+}
+
+func (u *uploader) trace(event string, n int) {
+	if u.core.uploadTrace != nil {
+		u.core.uploadTrace(event, n)
+	}
 }
 
 func (u *uploader) partURLMissing(n int) *Error {
@@ -357,24 +410,23 @@ func (u *uploader) recover(ctx context.Context, err error, n int, target string,
 		return err
 	}
 	// The part-urls fetch itself was refused for a reason a fresh page or proxied parts cannot fix.
-	if target == "" && u.directOK.Load() && isTerminal(failure) {
+	if target == "" && u.isDirect() && isTerminal(failure) {
 		return err
 	}
 	cause := failure
-	if target != "" && !state.refetched && (failure.Status == http.StatusForbidden || u.directOK.Load()) {
+	if target != "" && !state.refetched && (failure.Status == http.StatusForbidden || u.isDirect()) {
 		state.refetched = true
 		refreshErr := u.pages.refresh(ctx, n, target)
 		if refreshErr == nil {
 			return nil
 		}
 		refresh, isError := refreshErr.(*Error) //nolint:errorlint // as above
-		if !isError || refresh.Kind == KindAbort || ctx.Err() != nil || (u.directOK.Load() && isTerminal(refresh)) {
+		if !isError || refresh.Kind == KindAbort || ctx.Err() != nil || (u.isDirect() && isTerminal(refresh)) {
 			return refreshErr
 		}
 		cause = refresh
 	}
-	if !u.directOK.Load() {
-		u.proxied.Store(true)
+	if u.fallBack(n) {
 		return nil
 	}
 	return newSDKError(KindUpload, "parts_exhausted", "Part "+strconv.Itoa(n)+" failed after retries and a fresh URL.", cause, u.red, hintInputs{})
@@ -401,7 +453,7 @@ func (u *uploader) putProxied(ctx context.Context, n int, data []byte, hold *bod
 	target := u.core.cfg.baseURL + "/v1/uploads/" + url.PathEscape(u.job) + "/parts/" + strconv.Itoa(n)
 	req, err := partRequest(withAttemptTimeout(ctx, partTimeout), target, data, hold)
 	if err != nil {
-		return newSDKError(KindUpload, "upload_failed", "The part request could not be built.", err, u.red, hintInputs{})
+		return u.core.requestNotBuilt(err)
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	resp, err := u.core.doer.Do(req)
@@ -499,12 +551,13 @@ func (p *partPages) fetchPage(ctx context.Context, start int) error {
 }
 
 func (p *partPages) load(ctx context.Context, start int) error {
+	const route = "GET /v1/uploads/{job}/part-urls"
 	response, err := p.core.api.GetUploadPartUrlsWithResponse(ctx, p.job, &generated.GetUploadPartUrlsParams{Start: &start})
 	if err != nil {
-		return err
+		return p.core.readFailed(err, route)
 	}
-	if response.JSON200 == nil {
-		return p.core.badResponse("GET /v1/uploads/{job}/part-urls")
+	if failure := p.core.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "part_urls"); failure != nil {
+		return failure
 	}
 	if len(response.JSON200.PartUrls) == 0 {
 		p.mu.Lock()

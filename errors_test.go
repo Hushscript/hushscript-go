@@ -263,7 +263,7 @@ func TestKindNamesFollowSpecSection92(t *testing.T) {
 		KindConflict: "ConflictError", KindValidation: "ValidationError", KindRateLimit: "RateLimitError",
 		KindPaymentMethodRequired: "PaymentMethodRequiredError", KindUpload: "UploadError",
 		KindJobFailed: "JobFailedError", KindWaitTimeout: "WaitTimeoutError", KindAbort: "AbortError",
-		KindNetwork: "NetworkError", KindOutcomeUnknown: "OutcomeUnknownError",
+		KindNetwork: "NetworkError", KindOutcomeUnknown: "OutcomeUnknownError", KindPreflight: "PreflightError",
 	}
 	for kind, name := range want {
 		if kind.String() != name {
@@ -275,8 +275,27 @@ func TestKindNamesFollowSpecSection92(t *testing.T) {
 	}
 }
 
+// The numeric values of the kinds that existed before KindPreflight stay where they were: KindPreflight
+// is appended, not inserted.
+func TestKindValuesDoNotMoveWhenAKindIsAdded(t *testing.T) {
+	released := []ErrorKind{
+		KindAPI, KindConfiguration, KindUnsupportedMedia, KindFileLimit, KindDailyLimit, KindResumeMismatch,
+		KindAuthentication, KindPermissionDenied, KindInsufficientBalance, KindNotFound, KindConflict, KindValidation,
+		KindRateLimit, KindPaymentMethodRequired, KindUpload, KindJobFailed, KindWaitTimeout, KindAbort, KindNetwork,
+		KindOutcomeUnknown,
+	}
+	for i, kind := range released {
+		if int(kind) != i {
+			t.Errorf("%v is %d, want %d", kind, int(kind), i)
+		}
+	}
+	if int(KindPreflight) != len(released) {
+		t.Errorf("KindPreflight is %d, want %d", int(KindPreflight), len(released))
+	}
+}
+
 func TestKindFamilies(t *testing.T) {
-	for _, kind := range []ErrorKind{KindUnsupportedMedia, KindFileLimit, KindDailyLimit, KindResumeMismatch} {
+	for _, kind := range []ErrorKind{KindPreflight, KindUnsupportedMedia, KindFileLimit, KindDailyLimit, KindResumeMismatch} {
 		if !kind.IsPreflight() || kind.IsAPI() {
 			t.Errorf("%v should be preflight only", kind)
 		}

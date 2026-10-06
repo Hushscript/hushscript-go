@@ -34,7 +34,7 @@ func invalidOption(red redactor, message string, cause error) *Error {
 	return newSDKError(KindPreflight, "invalid_option", message, cause, red, hintInputs{})
 }
 
-// newIdempotencyKey is a UUID v4 string: 36 characters, valid for uploads (16 to 128 printable ASCII)
+// newIdempotencyKey is a UUID v4 string: 36 characters, valid for uploads (16 to 128 bytes of 0x21 to 0x7E)
 // and purchases alike (spec 7.3).
 func newIdempotencyKey() string {
 	var b [16]byte
@@ -76,14 +76,14 @@ func waitTimeoutOf(red redactor, waitTimeout time.Duration) (time.Duration, erro
 	return waitTimeout, nil
 }
 
-// checkKey is spec 7.3: an upload key is 16 to 128 printable ASCII characters.
+// checkKey is spec 7.3: an upload key is 16 to 128 bytes of 0x21 to 0x7E (printable ASCII, no space).
 func checkKey(red redactor, key string) error {
 	ok := len(key) >= minKeyLength && len(key) <= maxKeyLength
 	for i := 0; ok && i < len(key); i++ {
-		ok = key[i] >= 0x20 && key[i] <= 0x7e
+		ok = key[i] >= 0x21 && key[i] <= 0x7e
 	}
 	if !ok {
-		return invalidOption(red, "IdempotencyKey must be 16 to 128 printable ASCII characters.", nil)
+		return invalidOption(red, "IdempotencyKey must be 16 to 128 printable ASCII characters, without spaces.", nil)
 	}
 	return nil
 }
@@ -122,11 +122,10 @@ type annotator struct {
 func (a *annotator) annotate(ctx context.Context, err error) error {
 	failure, ok := err.(*Error) //nolint:errorlint // the pipeline returns its own errors unwrapped
 	if !ok {
-		red := a.core.cfg.redactor()
 		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			failure = a.core.abortError(err)
 		} else {
-			failure = newSDKError(KindUpload, "upload_failed", "The upload failed.", err, red, hintInputs{})
+			failure = a.core.requestNotBuilt(err)
 		}
 	}
 	if failure.IdempotencyKey == "" {
@@ -136,6 +135,12 @@ func (a *annotator) annotate(ctx context.Context, err error) error {
 		failure.ResumeToken = a.token
 	}
 	return failure
+}
+
+// requestNotBuilt is the error for a request the SDK could not even build, which only a base URL or a
+// path that cannot form a URL causes.
+func (c *core) requestNotBuilt(cause error) *Error {
+	return newSDKError(KindConfiguration, "config_invalid", "The request could not be built.", cause, c.cfg.redactor(), hintInputs{})
 }
 
 // Transcribe uploads the file at path, waits for it to be transcribed and returns the transcript. The
@@ -222,16 +227,17 @@ func bodyFrom(opts *TranscribeOptions, size int64, declared int, key string) cre
 // createUpload sends POST /v1/uploads. The doer paces it and replays it on a lost answer, because the
 // body carries the idempotency key.
 func (c *core) createUpload(ctx context.Context, body createBody) (*generated.UploadCreateResponse, error) {
+	const route = "POST /v1/uploads"
 	encoded, err := json.Marshal(body)
 	if err != nil {
-		return nil, newSDKError(KindUpload, "upload_failed", "The upload request could not be built.", err, c.cfg.redactor(), hintInputs{})
+		return nil, c.requestNotBuilt(err)
 	}
 	response, err := c.api.CreateUploadWithBodyWithResponse(ctx, "application/json", bytes.NewReader(encoded))
 	if err != nil {
-		return nil, err
+		return nil, c.readFailed(err, route)
 	}
-	if response.JSON200 == nil {
-		return nil, c.badResponse("POST /v1/uploads")
+	if failure := c.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "job_id", "state"); failure != nil {
+		return nil, failure
 	}
 	return response.JSON200, nil
 }
@@ -313,12 +319,14 @@ func (c *core) preflight(ctx context.Context, src *fileSource, opts *TranscribeO
 	}
 	declared := int(math.Ceil(seconds))
 
+	const accountRoute = "GET /v1/account"
 	account, err := c.api.GetAccountWithResponse(ctx)
 	if err != nil {
-		return 0, err
+		return 0, c.readFailed(err, accountRoute)
 	}
-	if account.JSON200 == nil {
-		return 0, c.badResponse("GET /v1/account")
+	if failure := c.unusable(accountRoute, account.HTTPResponse, account.JSON200 != nil, account.Body,
+		"balance_seconds", "limits.used_today_seconds", "limits.max_daily_seconds"); failure != nil {
+		return 0, failure
 	}
 	needed := billableEstimate(declared, opts)
 	balance := account.JSON200.BalanceSeconds
