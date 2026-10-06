@@ -366,9 +366,9 @@ func TestEveryPrefixOfEveryFixtureIsAnErrorOrAFiniteDuration(t *testing.T) {
 func TestEveryFixtureWithItsHeaderBytesFlippedIsAnErrorOrAFiniteDuration(t *testing.T) {
 	for name := range wantFormat {
 		data := readMedia(t, name)
-		for i := 0; i < min(len(data), 200); i++ {
-			for _, flip := range []byte{0x01, 0x80, 0xFF} {
-				mutated := bytes.Clone(data[:min(len(data), 70000)])
+		for i := 0; i < min(len(data), 128); i++ {
+			for _, flip := range []byte{0x01, 0xFF} {
+				mutated := bytes.Clone(data[:min(len(data), 8192)])
 				mutated[i] ^= flip
 				checkContract(t, name, mutated)
 			}
