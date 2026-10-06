@@ -32,10 +32,12 @@ type doer struct {
 	cfg   config
 	pacer *pacer
 	red   redactor
+	// limit is the most a response may hold in memory.
+	limit int64
 }
 
 func newDoer(cfg config) *doer {
-	return &doer{cfg: cfg, pacer: newPacer(cfg.clock), red: cfg.redactor()}
+	return &doer{cfg: cfg, pacer: newPacer(cfg.clock), red: cfg.redactor(), limit: maxResponseBytes}
 }
 
 // outcome is what one attempt produced.
@@ -143,8 +145,8 @@ func (d *doer) attempt(parent context.Context, req *http.Request) outcome {
 		return outcome{err: err, sent: connected.Load(), took: time.Since(started)}
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
-	if err == nil && len(body) > maxResponseBytes {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, d.limit+1))
+	if err == nil && int64(len(body)) > d.limit {
 		err = errResponseTooLarge
 	}
 	if err != nil {
