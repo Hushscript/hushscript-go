@@ -228,6 +228,9 @@ func mp3Resync(w *mp3Window, pos int64, first mp3Frame) (int64, bool) {
 		if f, ok := w.frame(at); ok && f.version == first.version && f.sampleRate == first.sampleRate && w.confirmed(at, f) {
 			return at, true
 		}
+		if w.err != nil {
+			break // a failed read ends the scan; stepping on would only walk to the end of the file
+		}
 	}
 	return 0, false
 }
