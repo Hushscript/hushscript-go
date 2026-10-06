@@ -26,9 +26,9 @@ func TestMapsStatusesAndSlugsToKinds(t *testing.T) {
 	}{
 		{"unauthorized", 401, KindAuthentication},
 		{"agent_claim_invalid", 401, KindAuthentication},
-		{"pat_scope_missing", 403, KindPermission},
-		{"pat_purchase_requires_app", 403, KindPermission},
-		{"country_restricted", 403, KindPermission},
+		{"pat_scope_missing", 403, KindPermissionDenied},
+		{"pat_purchase_requires_app", 403, KindPermissionDenied},
+		{"country_restricted", 403, KindPermissionDenied},
 		{"insufficient_balance", 402, KindInsufficientBalance},
 		{"org_insufficient_balance", 402, KindInsufficientBalance},
 		{"org_pool_expired", 402, KindInsufficientBalance},
@@ -60,10 +60,10 @@ func TestMapsStatusesAndSlugsToKinds(t *testing.T) {
 func TestEveryCatalogSlugMapsToTheClassSpecSection92Names(t *testing.T) {
 	want := map[string]ErrorKind{
 		"unauthorized": KindAuthentication, "agent_claim_invalid": KindAuthentication,
-		"pat_scope_missing": KindPermission, "pat_forbidden": KindPermission, "account_suspended": KindPermission,
-		"agent_pack_locked": KindPermission, "pat_purchase_requires_app": KindPermission,
-		"pat_purchase_requires_authentication": KindPermission, "country_restricted": KindPermission,
-		"signup_not_allowed":   KindPermission,
+		"pat_scope_missing": KindPermissionDenied, "pat_forbidden": KindPermissionDenied, "account_suspended": KindPermissionDenied,
+		"agent_pack_locked": KindPermissionDenied, "pat_purchase_requires_app": KindPermissionDenied,
+		"pat_purchase_requires_authentication": KindPermissionDenied, "country_restricted": KindPermissionDenied,
+		"signup_not_allowed":   KindPermissionDenied,
 		"insufficient_balance": KindInsufficientBalance, "org_insufficient_balance": KindInsufficientBalance,
 		"org_pool_expired": KindInsufficientBalance, "org_plan_frozen": KindInsufficientBalance,
 		"wrong_state": KindConflict, "agent_signup_pending": KindConflict, "pat_limit": KindConflict,
@@ -132,7 +132,7 @@ func TestKeepsTheNestedDetailsObjectAndFillsHintsFromIt(t *testing.T) {
 func TestDropsHintSentencesWithAnUnfilledPlaceholder(t *testing.T) {
 	// rate_limited without a wait: the second sentence mentions {retryAfter} and goes.
 	e := fromResponse(429, nil, jsonError("rate_limited", 5000), http.MethodGet, "/v1/account")
-	if e.Hint != "Too many requests" {
+	if e.Hint != "Too many requests." {
 		t.Errorf("hint = %q", e.Hint)
 	}
 	// agent_pack_locked with no allowed packs: the only sentence goes and the hint is empty.
@@ -258,7 +258,7 @@ func TestKindNamesFollowSpecSection92(t *testing.T) {
 	want := map[ErrorKind]string{
 		KindAPI: "ApiError", KindConfiguration: "ConfigurationError", KindUnsupportedMedia: "UnsupportedMediaError",
 		KindFileLimit: "FileLimitError", KindDailyLimit: "DailyLimitError", KindResumeMismatch: "ResumeMismatchError",
-		KindAuthentication: "AuthenticationError", KindPermission: "PermissionError",
+		KindAuthentication: "AuthenticationError", KindPermissionDenied: "PermissionDeniedError",
 		KindInsufficientBalance: "InsufficientBalanceError", KindNotFound: "NotFoundError",
 		KindConflict: "ConflictError", KindValidation: "ValidationError", KindRateLimit: "RateLimitError",
 		KindPaymentMethodRequired: "PaymentMethodRequiredError", KindUpload: "UploadError",
@@ -281,7 +281,7 @@ func TestKindFamilies(t *testing.T) {
 			t.Errorf("%v should be preflight only", kind)
 		}
 	}
-	for _, kind := range []ErrorKind{KindAPI, KindAuthentication, KindPermission, KindInsufficientBalance, KindNotFound, KindConflict, KindValidation, KindRateLimit} {
+	for _, kind := range []ErrorKind{KindAPI, KindAuthentication, KindPermissionDenied, KindInsufficientBalance, KindNotFound, KindConflict, KindValidation, KindRateLimit} {
 		if !kind.IsAPI() || kind.IsPreflight() {
 			t.Errorf("%v should be API only", kind)
 		}

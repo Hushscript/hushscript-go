@@ -26,13 +26,16 @@ type config struct {
 	token      secret
 	baseURL    string
 	baseHost   string
+	baseScheme string
 	timeout    time.Duration
 	maxRetries int
 	// maxRetriesSet tells an explicit 0 (retries off) from an option that was never given.
 	maxRetriesSet bool
 	logger        *slog.Logger
-	clock         Clock
-	httpClient    *http.Client
+	// logLevel is "off" or "debug" when WithLogLevel set it; "" leaves the choice to the environment.
+	logLevel   string
+	clock      Clock
+	httpClient *http.Client
 	// jitter picks the actual backoff below its ceiling. Tests replace it.
 	jitter func(time.Duration) time.Duration
 }
@@ -64,11 +67,11 @@ func WithToken(token string) Option {
 // conformance mock). Without it, New reads HUSHSCRIPT_BASE_URL and then uses https://api.hushscript.com.
 func WithBaseURL(baseURL string) Option {
 	return func(c *config) error {
-		validated, host, err := validateBaseURL(baseURL)
+		validated, err := validateBaseURL(baseURL)
 		if err != nil {
 			return err
 		}
-		c.baseURL, c.baseHost = validated, host
+		c.setBase(validated)
 		return nil
 	}
 }
@@ -106,6 +109,18 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
+// WithLogLevel sets the log level to "off" or "debug". It beats HUSHSCRIPT_LOG, so WithLogLevel("off")
+// silences HUSHSCRIPT_LOG=debug. "debug" without WithLogger logs to standard error.
+func WithLogLevel(level string) Option {
+	return func(c *config) error {
+		if level != logOff && level != logDebug {
+			return newConfigError("The log level must be off or debug.")
+		}
+		c.logLevel = level
+		return nil
+	}
+}
+
 // WithClock replaces the clock the SDK sleeps on, for tests and the conformance runner.
 func WithClock(clock Clock) Option {
 	return func(c *config) error {
@@ -134,10 +149,18 @@ func newConfigError(message string) *Error {
 	return newSDKError(KindConfiguration, "config_invalid", message, nil, redactor{})
 }
 
-func validateBaseURL(raw string) (validated, host string, err error) {
-	parsed, parseErr := url.Parse(raw)
-	if parseErr != nil || parsed.Host == "" || parsed.Hostname() == "" {
-		return "", "", newConfigError("The base URL is not a valid URL.")
+// setBase stores a validated base URL and the parts of it that decide where the token may go.
+func (c *config) setBase(validated *url.URL) {
+	c.baseURL = validated.String()
+	c.baseHost = validated.Host
+	c.baseScheme = validated.Scheme
+}
+
+// validateBaseURL accepts an https host, or an http one on loopback, with no path, query or fragment.
+func validateBaseURL(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || parsed.Hostname() == "" {
+		return nil, newConfigError("The base URL is not a valid URL.")
 	}
 	switch parsed.Scheme {
 	case "https":
@@ -145,15 +168,29 @@ func validateBaseURL(raw string) (validated, host string, err error) {
 		switch parsed.Hostname() {
 		case "localhost", "127.0.0.1", "::1":
 		default:
-			return "", "", newConfigError("The base URL must be https, or http to localhost, 127.0.0.1 or [::1].")
+			return nil, newConfigError("The base URL must be https, or http to localhost, 127.0.0.1 or [::1].")
 		}
 	default:
-		return "", "", newConfigError("The base URL must be https, or http to localhost, 127.0.0.1 or [::1].")
+		return nil, newConfigError("The base URL must be https, or http to localhost, 127.0.0.1 or [::1].")
 	}
 	if parsed.User != nil {
-		return "", "", newConfigError("The base URL cannot carry credentials.")
+		return nil, newConfigError("The base URL cannot carry credentials.")
 	}
-	return strings.TrimRight(parsed.String(), "/"), parsed.Host, nil
+	if (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return nil, newConfigError("The base URL must be a bare host: no path, query or fragment.")
+	}
+	return &url.URL{Scheme: parsed.Scheme, Host: parsed.Host}, nil
+}
+
+// validToken reports whether every byte is printable ASCII (0x21 to 0x7E), so the token can sit in
+// a header and never carries a space, control character or non-ASCII byte.
+func validToken(token string) bool {
+	for i := range len(token) {
+		if token[i] < 0x21 || token[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // resolve applies the options, then the environment, then the defaults, and validates the result.
@@ -170,6 +207,9 @@ func resolve(opts []Option) (config, error) {
 	if c.token == "" {
 		return config{}, newSDKError(KindConfiguration, "config_invalid", missingTokenMessage, nil, redactor{})
 	}
+	if !validToken(c.token.reveal()) {
+		return config{}, newConfigError("The token contains characters a Hushscript token never has (printable ASCII only).")
+	}
 	if !strings.HasPrefix(c.token.reveal(), tokenPrefix) {
 		return config{}, newConfigError("This doesn't look like a Hushscript token.")
 	}
@@ -178,11 +218,11 @@ func resolve(opts []Option) (config, error) {
 		if base == "" {
 			base = defaultBaseURL
 		}
-		validated, host, err := validateBaseURL(base)
+		validated, err := validateBaseURL(base)
 		if err != nil {
 			return config{}, err
 		}
-		c.baseURL, c.baseHost = validated, host
+		c.setBase(validated)
 	}
 	if c.timeout == 0 {
 		c.timeout = defaultTimeout

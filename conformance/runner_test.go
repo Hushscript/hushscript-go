@@ -4,6 +4,7 @@
 package conformance
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -130,9 +131,14 @@ func runScenario(parent context.Context, t *testing.T, mock *mockClient, name st
 	}
 	mapped, known := operations[scenario.Call.Op]
 	if !known || scenario.Call.Prior != nil || (mapped.errorsOnly && scenario.Expect.Error == nil) {
+		// The contract says a runner must not skip. Until every op is mapped a skip passes, and
+		// CONFORMANCE_STRICT=1 turns it into the failure the contract asks for.
+		if os.Getenv("CONFORMANCE_STRICT") == "1" {
+			t.Fatalf("op %q is not mapped yet", scenario.Call.Op)
+		}
 		t.Skipf("op %q is not mapped yet", scenario.Call.Op)
 	}
-	if err := mock.load(ctx, name); err != nil {
+	if err = mock.load(ctx, name); err != nil {
 		t.Fatal(err)
 	}
 
@@ -147,7 +153,7 @@ func runScenario(parent context.Context, t *testing.T, mock *mockClient, name st
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := mock.mark(ctx); err != nil {
+	if err = mock.mark(ctx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -163,7 +169,7 @@ func runScenario(parent context.Context, t *testing.T, mock *mockClient, name st
 		close(done)
 	}()
 	drive := &driver{mock: mock, clock: clock, transport: transport}
-	if err := drive.run(ctx, done); err != nil {
+	if err = drive.run(ctx, done); err != nil {
 		t.Fatal(err)
 	}
 	got := <-finished
@@ -179,7 +185,7 @@ func runScenario(parent context.Context, t *testing.T, mock *mockClient, name st
 	case got.err != nil:
 		t.Fatalf("unexpected error: %v", got.err)
 	default:
-		if err := subset(scenario.Expect.Result, got.result, "result"); err != nil {
+		if err = subset(scenario.Expect.Result, got.result, "result"); err != nil {
 			t.Error(err)
 		}
 	}
@@ -306,7 +312,7 @@ func subset(want, got any, path string) error {
 	default:
 		wantJSON, _ := json.Marshal(want)
 		gotJSON, _ := json.Marshal(got)
-		if string(wantJSON) != string(gotJSON) {
+		if !bytes.Equal(wantJSON, gotJSON) {
 			return fmt.Errorf("%s: want %s, got %s", path, wantJSON, gotJSON)
 		}
 		return nil

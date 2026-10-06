@@ -247,12 +247,12 @@ func TestNeverRetriesClaimOrRotateAndReportsAnUnknownOutcome(t *testing.T) {
 	}
 }
 
-func TestNeverRetriesSignupAndReportsANetworkError(t *testing.T) {
+func TestNeverRetriesSignupAndReportsAnUnknownOutcome(t *testing.T) {
 	srv := newScriptedServer(t, step{drop: true}, okBody)
 	c := newTestClient(t, srv.URL, newFakeClock())
 	_, err := do(t, c, http.MethodPost, "/v1/agent/accounts", `{}`)
-	if e := asError(t, err); e.Kind != KindNetwork || srv.count() != 1 {
-		t.Errorf("kind %v, %d requests", e.Kind, srv.count())
+	if e := asError(t, err); e.Kind != KindOutcomeUnknown || e.Hint != "" || srv.count() != 1 {
+		t.Errorf("a lost signup is an unknown outcome with no hint: kind %v hint %q, %d requests", e.Kind, e.Hint, srv.count())
 	}
 }
 
@@ -593,5 +593,85 @@ func TestIsSilentWithoutALogger(t *testing.T) {
 	_, err := do(t, c, http.MethodGet, "/v1/account", "")
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestACancelledClaimRotateOrSignupAfterTheBodyWasSentIsAnUnknownOutcome(t *testing.T) {
+	for path, hint := range map[string]string{
+		"/v1/agent/accounts/sg_1/claim": claimOutcomeHint,
+		"/v1/agent/credentials/rotate":  rotateOutcomeHint,
+		"/v1/agent/accounts":            "",
+	} {
+		srv := newScriptedServer(t, step{status: 200, delay: 5 * time.Second})
+		c := newTestClient(t, srv.URL, newFakeClock())
+		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+		_, err := doContext(ctx, t, c, http.MethodPost, path, `{}`)
+		cancel()
+		e := asError(t, err)
+		if e.Kind != KindOutcomeUnknown || e.Hint != hint || !isContextError(err) || srv.count() != 1 {
+			t.Errorf("%s: kind %v hint %q cause ok %v, %d requests", path, e.Kind, e.Hint, isContextError(err), srv.count())
+		}
+	}
+	// Cancelled before anything was sent: a plain abort.
+	srv := newScriptedServer(t, okBody)
+	c := newTestClient(t, srv.URL, newFakeClock())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := doContext(ctx, t, c, http.MethodPost, "/v1/agent/credentials/rotate", `{}`)
+	if e := asError(t, err); e.Kind != KindAbort || srv.count() != 0 {
+		t.Errorf("kind %v, %d requests", e.Kind, srv.count())
+	}
+}
+
+func TestABodyThatFailsMidStreamCountsAsSent(t *testing.T) {
+	for _, path := range []string{"/v1/agent/accounts/sg_1/claim", "/v1/agent/credentials/rotate"} {
+		srv := newScriptedServer(t, step{cut: true}, okBody)
+		c := newTestClient(t, srv.URL, newFakeClock())
+		_, err := do(t, c, http.MethodPost, path, `{}`)
+		if e := asError(t, err); e.Kind != KindOutcomeUnknown || srv.count() != 1 {
+			t.Errorf("%s: kind %v, %d requests", path, e.Kind, srv.count())
+		}
+	}
+	srv := newScriptedServer(t, step{cut: true}, okBody)
+	c := newTestClient(t, srv.URL, newFakeClock())
+	reply, err := do(t, c, http.MethodGet, "/v1/account", "")
+	if err != nil || srv.count() != 2 || reply.Text != `{"ok":true}` {
+		t.Errorf("a GET whose body broke is retried: %d requests, err %v", srv.count(), err)
+	}
+	srv = newScriptedServer(t, step{cut: true}, okBody)
+	c = newTestClient(t, srv.URL, newFakeClock())
+	_, err = do(t, c, http.MethodPatch, "/v1/org/members/u1", `{}`)
+	if e := asError(t, err); e.Kind != KindNetwork || srv.count() != 1 {
+		t.Errorf("a mutation whose answer broke must not be replayed: kind %v, %d requests", e.Kind, srv.count())
+	}
+}
+
+func TestOnlyTheirOwnRateLimitsCountTowardTheCreateSchedules(t *testing.T) {
+	// Two 500s use the generic budget; the 15/30/60 schedule and its three waits are still all available.
+	steps := []step{{status: 500}, {status: 500}, rateLimited(nil), rateLimited(nil), rateLimited(nil), okBody}
+	srv := newScriptedServer(t, steps...)
+	clock := newFakeClock()
+	c := newTestClient(t, srv.URL, clock)
+	if _, err := do(t, c, http.MethodPost, "/v1/uploads", `{}`); err != nil {
+		t.Fatalf("after %d requests: %v", srv.count(), err)
+	}
+	if srv.count() != 6 {
+		t.Errorf("requests = %d", srv.count())
+	}
+	// Active-jobs waits do not eat the rate-limit schedule either.
+	busy := step{status: 429, body: jsonError("too_many_active_jobs", 5001)}
+	srv = newScriptedServer(t, busy, busy, rateLimited(nil), rateLimited(nil), rateLimited(nil), okBody)
+	c = newTestClient(t, srv.URL, newFakeClock())
+	if _, err := do(t, c, http.MethodPost, "/v1/uploads", `{}`); err != nil {
+		t.Fatalf("after %d requests: %v", srv.count(), err)
+	}
+}
+
+func TestOnlyANonRateLimitStatusWithAHugeRetryAfterKeepsItsOwnClass(t *testing.T) {
+	srv := newScriptedServer(t, step{status: 503, headers: map[string]string{"Retry-After": "61"}})
+	c := newTestClient(t, srv.URL, newFakeClock())
+	_, err := do(t, c, http.MethodGet, "/v1/account", "")
+	if e := asError(t, err); e.Kind == KindRateLimit || e.RetryAfter != 61*time.Second {
+		t.Errorf("kind %v retryAfter %v: a 503 is not a rate limit", e.Kind, e.RetryAfter)
 	}
 }

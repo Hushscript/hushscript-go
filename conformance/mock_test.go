@@ -27,7 +27,7 @@ func newMockClient() *mockClient {
 	return &mockClient{http: &http.Client{Timeout: 30 * time.Second}}
 }
 
-func (m *mockClient) do(ctx context.Context, method, path string, body any, into any) error {
+func (m *mockClient) do(ctx context.Context, method, path string, body, into any) error {
 	var reader io.Reader = http.NoBody
 	if body != nil {
 		encoded, err := json.Marshal(body)

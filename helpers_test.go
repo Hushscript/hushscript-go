@@ -59,6 +59,7 @@ type step struct {
 	headers map[string]string
 	body    string
 	drop    bool          // close the connection after reading the request
+	cut     bool          // send the headers and part of the body, then close the connection
 	delay   time.Duration // hold the answer
 }
 
@@ -94,6 +95,15 @@ func newScriptedServer(t *testing.T, steps ...step) *scriptedServer {
 		if current.drop {
 			if hijacker, ok := w.(http.Hijacker); ok {
 				if conn, _, err := hijacker.Hijack(); err == nil {
+					_ = conn.Close()
+				}
+			}
+			return
+		}
+		if current.cut {
+			if hijacker, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hijacker.Hijack(); err == nil {
+					_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"par")
 					_ = conn.Close()
 				}
 			}

@@ -16,18 +16,30 @@ func withLogLabel(ctx context.Context, label string) context.Context {
 	return context.WithValue(ctx, logLabelKey{}, label)
 }
 
-// resolveLogger picks the logger: an explicit one, else standard error at debug level when
-// HUSHSCRIPT_LOG=debug, else none.
+const (
+	logOff   = "off"
+	logDebug = "debug"
+)
+
+// resolveLogger picks the logger. An explicit WithLogLevel beats HUSHSCRIPT_LOG; "off" removes any
+// logger, "debug" uses the given one or standard error. Without either, a WithLogger logger is used
+// as given, and HUSHSCRIPT_LOG=debug turns on standard error.
 func resolveLogger(c *config) error {
-	level := strings.ToLower(strings.TrimSpace(os.Getenv("HUSHSCRIPT_LOG")))
-	switch level {
-	case "", "off":
-	case "debug":
-		if c.logger == nil {
-			c.logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	level := c.logLevel
+	if level == "" {
+		switch env := strings.ToLower(strings.TrimSpace(os.Getenv("HUSHSCRIPT_LOG"))); env {
+		case "", logOff:
+		case logDebug:
+			level = logDebug
+		default:
+			return newConfigError("HUSHSCRIPT_LOG must be off or debug.")
 		}
-	default:
-		return newConfigError("HUSHSCRIPT_LOG must be off or debug.")
+	}
+	switch {
+	case level == logOff:
+		c.logger = nil
+	case level == logDebug && c.logger == nil:
+		c.logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	return nil
 }

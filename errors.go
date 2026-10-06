@@ -25,7 +25,7 @@ const (
 	KindDailyLimit
 	KindResumeMismatch
 	KindAuthentication
-	KindPermission
+	KindPermissionDenied
 	KindInsufficientBalance
 	KindNotFound
 	KindConflict
@@ -48,7 +48,7 @@ var kindNames = map[ErrorKind]string{
 	KindDailyLimit:            "DailyLimitError",
 	KindResumeMismatch:        "ResumeMismatchError",
 	KindAuthentication:        "AuthenticationError",
-	KindPermission:            "PermissionError",
+	KindPermissionDenied:      "PermissionDeniedError",
 	KindInsufficientBalance:   "InsufficientBalanceError",
 	KindNotFound:              "NotFoundError",
 	KindConflict:              "ConflictError",
@@ -242,7 +242,7 @@ func kindFor(slug string, status int) ErrorKind {
 	case http.StatusUnauthorized:
 		return KindAuthentication
 	case http.StatusForbidden:
-		return KindPermission
+		return KindPermissionDenied
 	case http.StatusPaymentRequired:
 		return KindInsufficientBalance
 	case http.StatusNotFound:
@@ -336,12 +336,12 @@ func formatDetail(value any) string {
 
 var placeholder = regexp.MustCompile(`\{([A-Za-z]+)\}`)
 
-// fillHint renders a hint template (spec section 9.3): split it on ". ", drop every sentence that
-// mentions a placeholder with no value, fill the rest and join them with ". ". It returns "" when
-// nothing is left.
+// fillHint renders a hint template (spec section 9.3): split it after each ". " so every sentence
+// keeps its own punctuation, drop the sentences that mention a placeholder with no value, fill the
+// rest and join them with one space. It returns "" when nothing is left.
 func fillHint(template string, values map[string]string) string {
 	var kept []string
-	for _, sentence := range strings.Split(template, ". ") {
+	for _, sentence := range splitSentences(template) {
 		complete := true
 		for _, match := range placeholder.FindAllStringSubmatch(sentence, -1) {
 			if _, ok := values[match[1]]; !ok {
@@ -356,7 +356,20 @@ func fillHint(template string, values map[string]string) string {
 			return values[token[1:len(token)-1]]
 		}))
 	}
-	return strings.Join(kept, ". ")
+	return strings.Join(kept, " ")
+}
+
+// splitSentences cuts after every ". ", keeping the period with its sentence.
+func splitSentences(text string) []string {
+	var sentences []string
+	for {
+		index := strings.Index(text, ". ")
+		if index < 0 {
+			return append(sentences, text)
+		}
+		sentences = append(sentences, text[:index+1])
+		text = text[index+2:]
+	}
 }
 
 // operationOf finds the "METHOD /template" key of the operation a concrete request path belongs to.

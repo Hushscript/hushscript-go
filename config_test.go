@@ -104,7 +104,10 @@ func TestAcceptsOnlyHTTPSOrLoopbackHTTPBaseURLs(t *testing.T) {
 			t.Errorf("%s kept its trailing slash: %q", base, c.core.cfg.baseURL)
 		}
 	}
-	bad := []string{"http://api.hushscript.com", "ftp://127.0.0.1", "api.hushscript.com", "", "http://", "https://", "://x", "http://127.0.0.1.evil.test"}
+	bad := []string{
+		"http://api.hushscript.com", "ftp://127.0.0.1", "api.hushscript.com", "", "http://", "https://", "://x", "http://127.0.0.1.evil.test",
+		"https://api.hushscript.com/v1", "https://api.hushscript.com?x=1", "https://api.hushscript.com#frag", "https://u:p@api.hushscript.com",
+	}
 	for _, base := range bad {
 		_, err := New(WithToken(testToken), WithBaseURL(base))
 		if err == nil {
@@ -170,6 +173,19 @@ func TestLoggingIsOffUnlessAskedFor(t *testing.T) {
 	t.Setenv("HUSHSCRIPT_LOG", "verbose")
 	if _, verboseErr := New(WithToken(testToken)); verboseErr == nil {
 		t.Error("an unknown log level was accepted")
+	}
+	t.Setenv("HUSHSCRIPT_LOG", "debug")
+	c, err = New(WithToken(testToken), WithLogLevel("off"))
+	if err != nil || c.core.cfg.logger != nil {
+		t.Errorf("WithLogLevel(off) should beat HUSHSCRIPT_LOG=debug: logger %v, err %v", c.core.cfg.logger, err)
+	}
+	t.Setenv("HUSHSCRIPT_LOG", "off")
+	c, err = New(WithToken(testToken), WithLogLevel("debug"))
+	if err != nil || c.core.cfg.logger == nil {
+		t.Errorf("WithLogLevel(debug) should beat HUSHSCRIPT_LOG=off: err %v", err)
+	}
+	if _, levelErr := New(WithToken(testToken), WithLogLevel("info")); levelErr == nil {
+		t.Error("an unknown level was accepted")
 	}
 	own := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 	t.Setenv("HUSHSCRIPT_LOG", "")
@@ -240,5 +256,18 @@ func TestSystemClockSleepsAndHonorsCancellation(t *testing.T) {
 	cancel()
 	if err := clock.Sleep(ctx, time.Hour); err == nil {
 		t.Error("a cancelled sleep returned nil")
+	}
+}
+
+func TestRejectsATokenWithCharactersOutsidePrintableASCIIWithoutEchoingIt(t *testing.T) {
+	for _, token := range []string{"hsr1 with space", "hsr1\nnewline", "hsr1\x00nul", "hsr1:eu:pat.…", "hsr\x7f", "hsr1\ttab"} {
+		_, err := New(WithToken(token))
+		apiErr := asError(t, err)
+		if apiErr.Kind != KindConfiguration {
+			t.Errorf("%q: kind %v", token, apiErr.Kind)
+		}
+		if strings.Contains(apiErr.Error(), strings.TrimPrefix(token, "hsr")) && len(token) > 5 {
+			t.Errorf("%q was echoed in %q", token, apiErr.Error())
+		}
 	}
 }

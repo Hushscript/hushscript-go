@@ -80,6 +80,9 @@ func (d *doer) Do(req *http.Request) (*http.Response, error) {
 		if out.err != nil {
 			if err := ctx.Err(); err != nil {
 				d.cfg.logAttempt(ctx, record)
+				if class == classNever && out.sent {
+					return nil, d.outcomeUnknown(req, err)
+				}
 				return nil, d.aborted(err)
 			}
 			if state.retries >= budget || !retryableNetworkError(class, out.sent) {
@@ -130,7 +133,7 @@ func (d *doer) attempt(parent context.Context, req *http.Request) outcome {
 		r.Body = body
 	}
 	// The token goes to the API host only; direct-to-storage part uploads carry their own signature.
-	if r.URL.Host == d.cfg.baseHost {
+	if r.URL.Host == d.cfg.baseHost && r.URL.Scheme == d.cfg.baseScheme {
 		r.Header.Set("Authorization", "Bearer "+d.cfg.token.reveal())
 	}
 	r.Header.Set("User-Agent", userAgent())
@@ -194,28 +197,34 @@ func (d *doer) aborted(cause error) *Error {
 }
 
 // networkFailure is the error for an attempt that got no answer and will not be retried. When the
-// request was sent and the operation mints a credential, the outcome is unknown, not a plain failure.
+// request was sent and the operation mints a credential or an account, the outcome is unknown, not a
+// plain failure.
 func (d *doer) networkFailure(class retryClass, req *http.Request, out outcome) *Error {
 	if class == classNever && out.sent {
-		hint := ""
-		switch {
-		case strings.HasSuffix(req.URL.Path, "/claim"):
-			hint = claimOutcomeHint
-		case strings.HasSuffix(req.URL.Path, "/credentials/rotate"):
-			hint = rotateOutcomeHint
-		}
-		if hint != "" {
-			failure := newSDKError(KindOutcomeUnknown, "outcome_unknown",
-				"The request was sent but no response arrived, so its outcome is unknown.", out.err, d.red)
-			failure.Hint = hint
-			return failure
-		}
+		return d.outcomeUnknown(req, out.err)
 	}
 	message := "The request to the Hushscript API failed."
 	if errors.Is(out.err, context.DeadlineExceeded) {
 		message = fmt.Sprintf("The request to the Hushscript API timed out after %s.", d.cfg.timeout)
 	}
 	return newSDKError(KindNetwork, "network_error", message, out.err, d.red)
+}
+
+// outcomeUnknown is the error for a claim, rotate or signup whose request was sent and whose answer
+// never arrived (a network error, a timeout or a cancellation): the server may have acted. Claim and
+// rotate carry the hints of spec section 7.4; signup has none.
+func (d *doer) outcomeUnknown(req *http.Request, cause error) *Error {
+	failure := newSDKError(KindOutcomeUnknown, "outcome_unknown",
+		"The request was sent but no response arrived, so its outcome is unknown.", cause, d.red)
+	switch {
+	case strings.HasSuffix(req.URL.Path, "/claim"):
+		failure.Hint = claimOutcomeHint
+	case strings.HasSuffix(req.URL.Path, "/credentials/rotate"):
+		failure.Hint = rotateOutcomeHint
+	default:
+		failure.Hint = ""
+	}
+	return failure
 }
 
 // logPath is how a request is named in the log: its path on the API host, a caller's label for a
