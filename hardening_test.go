@@ -143,6 +143,13 @@ func TestAnUploadCreateIsRetriedOnlyWithAnIdempotencyKey(t *testing.T) {
 			if srv.count() != tc.count {
 				t.Errorf("%s, %s: %d requests, want %d", name, kind, srv.count(), tc.count)
 			}
+			if strings.Contains(tc.body, `"idempotency_key":"abc"`) {
+				for i := range srv.count() {
+					if got := srv.request(i).body; !strings.Contains(got, `"idempotency_key":"abc"`) {
+						t.Errorf("%s, %s: request %d reached the server as %q, without the idempotency key", name, kind, i, got)
+					}
+				}
+			}
 		}
 	}
 }

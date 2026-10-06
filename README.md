@@ -13,6 +13,8 @@ if err != nil {
 api := client.API() // the generated client, wired to the retrying HTTP core
 ```
 
+`WithHTTPClient` takes a shallow copy of the `*http.Client` at `New()`, so reassigning its fields afterwards does not reach the SDK.
+
 Requires Go 1.25 or newer. Server-side use only: a token must never ship in a browser bundle.
 
 ## Development
