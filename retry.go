@@ -11,9 +11,11 @@ import (
 type retryClass int
 
 const (
-	// classSafe covers GETs, heartbeat, complete and part uploads: network errors, 429 and 5xx are retried.
+	// classSafe covers GETs and heartbeat: network errors, 429, 500, 502, 503 and 504 are retried.
 	classSafe retryClass = iota
-	// classUploadCreate is POST /v1/uploads, which always carries an idempotency key and is paced.
+	// classUpload covers complete and part PUTs, which are safe to repeat: network errors, 429 and any 5xx are retried.
+	classUpload
+	// classUploadCreate is POST /v1/uploads with an idempotency key. It is paced, and a replay returns the same job.
 	classUploadCreate
 	// classPurchase is purchase and setup-session: network errors, 502 and 503, at most once.
 	classPurchase
@@ -37,7 +39,8 @@ const (
 
 var rateLimitedWaits = [rateLimitedBackoff]time.Duration{15 * time.Second, 30 * time.Second, 60 * time.Second}
 
-// classify picks the retry class of a request by method and path.
+// classify picks the retry class of a request by method and path. The path must be the escaped one
+// (URL.EscapedPath): a signup id with a slash in it is one segment there, not two.
 func classify(method, path string) retryClass {
 	segments := strings.Split(strings.Trim(path, "/"), "/")
 	switch method {
@@ -47,8 +50,10 @@ func classify(method, path string) retryClass {
 		switch {
 		case matches(segments, "v1", "uploads"):
 			return classUploadCreate
-		case matches(segments, "v1", "uploads", "*", "heartbeat"), matches(segments, "v1", "uploads", "*", "complete"):
+		case matches(segments, "v1", "uploads", "*", "heartbeat"):
 			return classSafe
+		case matches(segments, "v1", "uploads", "*", "complete"):
+			return classUpload
 		case matches(segments, "v1", "billing", "purchase"), matches(segments, "v1", "billing", "setup-session"):
 			return classPurchase
 		case matches(segments, "v1", "agent", "accounts", "*", "claim"),
@@ -58,7 +63,7 @@ func classify(method, path string) retryClass {
 		}
 	case http.MethodPut:
 		if matches(segments, "v1", "uploads", "*", "parts", "*") {
-			return classSafe
+			return classUpload
 		}
 	}
 	return classMutate
@@ -111,7 +116,7 @@ func retryableStatus(class retryClass, status int) bool {
 			status == http.StatusBadGateway || status == http.StatusServiceUnavailable ||
 			status == http.StatusGatewayTimeout
 	}
-	if class == classUploadCreate {
+	if class == classUpload || class == classUploadCreate {
 		return status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
 	}
 	if class == classPurchase {

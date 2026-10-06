@@ -3,6 +3,7 @@ package hushscript
 import (
 	"fmt"
 	"io"
+	"net/http"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -35,19 +36,41 @@ func New(opts ...Option) (*Client, error) {
 	d := newDoer(cfg)
 	api, err := generated.NewClientWithResponses(cfg.baseURL, generated.WithHTTPClient(d))
 	if err != nil {
-		return nil, newSDKError(KindConfiguration, "config_invalid", "The generated client could not be built.", err, cfg.redactor())
+		return nil, newSDKError(KindConfiguration, "config_invalid", "The generated client could not be built.", err, cfg.redactor(), hintInputs{})
 	}
 	return &Client{core: &core{cfg: cfg, doer: d, api: api}}, nil
 }
 
 // API returns the generated client for every /v1 operation, sharing the SDK's retries, timeouts and
-// error handling.
+// error handling. On a zero Client (one not built by New) it returns a client whose every call fails
+// with a KindConfiguration error, so a forgotten New shows up as an error and not a nil dereference.
 func (c Client) API() *generated.ClientWithResponses {
+	if c.core == nil {
+		return unconfiguredAPI()
+	}
 	return c.core.api
+}
+
+// unconfiguredDoer fails every request: it stands behind the API of a zero Client.
+type unconfiguredDoer struct{}
+
+func (unconfiguredDoer) Do(*http.Request) (*http.Response, error) {
+	return nil, newConfigError("This Client was not built by hushscript.New.")
+}
+
+func unconfiguredAPI() *generated.ClientWithResponses {
+	api, err := generated.NewClientWithResponses(defaultBaseURL, generated.WithHTTPClient(unconfiguredDoer{}))
+	if err != nil { // the base URL is a constant, so this cannot happen
+		panic(err)
+	}
+	return api
 }
 
 // String describes the client without its token.
 func (c Client) String() string {
+	if c.core == nil {
+		return "hushscript.Client{unconfigured}"
+	}
 	cfg := c.core.cfg
 	return fmt.Sprintf("hushscript.Client{baseURL: %s, timeout: %s, maxRetries: %d, token: %s}",
 		cfg.baseURL, cfg.timeout, cfg.maxRetries, redactedToken)

@@ -10,7 +10,6 @@ import (
 var hints = map[string]string{
 	"agent_pack_locked":                    "New agent accounts can buy {allowedPacks} until earlier purchases settle.",
 	"agent_purchase_capped":                "This account has used its 3 purchase attempts for the last 24 hours. Try again in {retryAfter} s.",
-	"config_invalid":                       "(message carries the specific reason)",
 	"daily_limit":                          "This upload would pass your daily transcription limit ({used} of {max} min used in the last 24 h).",
 	"duration_out_of_range":                "Files must be between 15 seconds and 10 hours long.",
 	"duration_unreadable":                  "Could not read the file's duration. Pass durationSeconds.",

@@ -3,3 +3,7 @@ rules:
     config:
       policies:
         "*": hash-pin
+  concurrency-limits:
+    ignore:
+      # A release must never be cancelled half way: a second push waits its turn instead.
+      - release.yml

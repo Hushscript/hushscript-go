@@ -54,8 +54,12 @@ services:
 
   test:
     <<: *sandboxed
+    # The hint tests read fixtures/hint-rendering.json; the justfile points CONFORMANCE_DIR at a checkout.
+    volumes:
+      - ${CONFORMANCE_DIR:-.}:/conformance:ro
     environment:
       GOPROXY: "off"
+      CONFORMANCE_DIR: /conformance
     command:
       - sh
       - -c
@@ -66,8 +70,11 @@ services:
   # go-mutesting on the HTTP core (nightly). It rewrites sources in place, so it works on a copy.
   mutation:
     <<: *sandboxed
+    volumes:
+      - ${CONFORMANCE_DIR:-.}:/conformance:ro
     environment:
       GOPROXY: "off"
+      CONFORMANCE_DIR: /conformance
     command: ["timeout", "1800", "scripts/mutation.sh", "75"]
 
   # Native fuzz targets, one at a time (nightly).
@@ -95,7 +102,7 @@ services:
     environment:
       GOPROXY: "off"
       HUSHSCRIPT_CONFORMANCE: "1"
-    command: ["timeout", "1800", "go", "test", "-race", "-count=1", "-v", "./conformance/..."]
+    command: ["timeout", "1800", "go", "test", "-race", "-shuffle=on", "-count=1", "-v", "./conformance/..."]
 
   examples:
     <<: *sandboxed

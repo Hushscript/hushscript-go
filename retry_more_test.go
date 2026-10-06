@@ -202,12 +202,12 @@ func TestCancellationWhilePacingAborts(t *testing.T) {
 	clock := newFakeClock()
 	c := newTestClient(t, srv.URL, clock)
 	for range createsPerWindow {
-		if _, err := do(t, c, http.MethodPost, "/v1/uploads", `{}`); err != nil {
+		if _, err := do(t, c, http.MethodPost, "/v1/uploads", `{"idempotency_key":"k"}`); err != nil {
 			t.Fatal(err)
 		}
 	}
 	c.core.doer.pacer.clock = cancellingClock{clock}
-	_, err := do(t, c, http.MethodPost, "/v1/uploads", `{}`)
+	_, err := do(t, c, http.MethodPost, "/v1/uploads", `{"idempotency_key":"k"}`)
 	if e := asError(t, err); e.Kind != KindAbort || srv.count() != createsPerWindow {
 		t.Errorf("kind %v, %d requests", e.Kind, srv.count())
 	}

@@ -3,9 +3,13 @@ package hushscript
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"strings"
@@ -40,12 +44,33 @@ func newDoer(cfg config) *doer {
 	return &doer{cfg: cfg, pacer: newPacer(cfg.clock), red: cfg.redactor(), limit: maxResponseBytes}
 }
 
+// maxKeyPeekBytes bounds how much of an upload-create body is read to look for its idempotency key.
+const maxKeyPeekBytes = 1 << 20
+
+type (
+	retryClassKey     struct{}
+	attemptTimeoutKey struct{}
+)
+
+// withRetryClass makes the doer treat the request as the given class, whatever its method and path say.
+// Direct-to-storage part uploads use it: their URL is not an API path.
+func withRetryClass(ctx context.Context, class retryClass) context.Context {
+	return context.WithValue(ctx, retryClassKey{}, class)
+}
+
+// withAttemptTimeout replaces the configured timeout for each attempt of the request (the 300 s of
+// an upload part, spec section 3). The caller's own context deadline still applies.
+func withAttemptTimeout(ctx context.Context, timeout time.Duration) context.Context {
+	return context.WithValue(ctx, attemptTimeoutKey{}, timeout)
+}
+
 // outcome is what one attempt produced.
 type outcome struct {
 	resp *http.Response
 	body []byte
 	err  error
-	// sent says whether the request may have reached the server: a connection was obtained.
+	// sent says whether the request may have reached the server. It is true unless the failure is
+	// provably in connection setup, which a custom transport cannot be trusted to report any other way.
 	sent bool
 	took time.Duration
 }
@@ -60,7 +85,7 @@ type retryState struct {
 // Do sends the request and returns the 2xx response with its body already read, or a *Error.
 func (d *doer) Do(req *http.Request) (*http.Response, error) {
 	ctx := req.Context()
-	class := classify(req.Method, req.URL.Path)
+	class, paced := d.plan(req)
 	budget := retryBudget(class, d.cfg.maxRetries)
 	if req.Body != nil && req.Body != http.NoBody && req.GetBody == nil {
 		budget = 0 // a body that cannot be replayed cannot be retried
@@ -71,7 +96,7 @@ func (d *doer) Do(req *http.Request) (*http.Response, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, d.aborted(err)
 		}
-		if class == classUploadCreate {
+		if paced {
 			if err := d.pacer.acquire(ctx); err != nil {
 				return nil, d.aborted(err)
 			}
@@ -105,7 +130,7 @@ func (d *doer) Do(req *http.Request) (*http.Response, error) {
 			d.cfg.logAttempt(ctx, record)
 			return out.resp, nil
 		}
-		failure := errorFromResponse(out.resp.StatusCode, out.resp.Header, out.body, req.Method, req.URL.Path, d.red)
+		failure := errorFromResponse(out.resp.StatusCode, out.resp.Header, out.body, req.Method, req.URL.EscapedPath(), d.red)
 		retry, delay := d.statusRetry(class, &state, failure, out.resp.Header, budget)
 		record.retryDelay = delay
 		d.cfg.logAttempt(ctx, record)
@@ -118,14 +143,67 @@ func (d *doer) Do(req *http.Request) (*http.Response, error) {
 	}
 }
 
+// plan picks the retry class of a request, and says whether it is an upload create, which is paced
+// whether or not it may be retried. An upload create is retried only when its body carries an
+// idempotency key: without one a replay would place a second hold.
+func (d *doer) plan(req *http.Request) (class retryClass, paced bool) {
+	natural := classify(req.Method, req.URL.EscapedPath())
+	paced = natural == classUploadCreate
+	if forced, ok := req.Context().Value(retryClassKey{}).(retryClass); ok {
+		return forced, paced || forced == classUploadCreate
+	}
+	if natural == classUploadCreate && !carriesIdempotencyKey(req) {
+		natural = classMutate
+	}
+	return natural, paced
+}
+
+// carriesIdempotencyKey reports whether the JSON body has a non-empty idempotency_key. It reads a
+// fresh copy of the body, so the request itself is untouched.
+func carriesIdempotencyKey(req *http.Request) bool {
+	if req.GetBody == nil {
+		return false
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return false
+	}
+	defer func() { _ = body.Close() }()
+	var payload struct {
+		Key string `json:"idempotency_key"`
+	}
+	if err := json.NewDecoder(io.LimitReader(body, maxKeyPeekBytes)).Decode(&payload); err != nil {
+		return false
+	}
+	return payload.Key != ""
+}
+
+// timeoutFor is the per-attempt timeout of a request.
+func (d *doer) timeoutFor(ctx context.Context) time.Duration {
+	if override, ok := ctx.Value(attemptTimeoutKey{}).(time.Duration); ok && override > 0 {
+		return override
+	}
+	return d.cfg.timeout
+}
+
 // attempt sends the request once, under its own timeout, and reads the whole answer inside it.
 func (d *doer) attempt(parent context.Context, req *http.Request) outcome {
 	started := time.Now()
-	ctx, cancel := context.WithTimeout(parent, d.cfg.timeout)
+	ctx, cancel := context.WithTimeout(parent, d.timeoutFor(parent))
 	defer cancel()
 
-	var connected atomic.Bool
-	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { connected.Store(true) }}
+	// The hooks fire only when the transport is (or wraps) an http.Transport; for any other transport
+	// the error itself has to prove that nothing was sent.
+	var asked, connected, handshakeFailed atomic.Bool
+	trace := &httptrace.ClientTrace{
+		GetConn: func(string) { asked.Store(true) },
+		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			if err != nil {
+				handshakeFailed.Store(true)
+			}
+		},
+	}
 	r := req.Clone(httptrace.WithClientTrace(ctx, trace))
 	if req.GetBody != nil {
 		body, err := req.GetBody()
@@ -135,14 +213,17 @@ func (d *doer) attempt(parent context.Context, req *http.Request) outcome {
 		r.Body = body
 	}
 	// The token goes to the API host only; direct-to-storage part uploads carry their own signature.
-	if r.URL.Host == d.cfg.baseHost && r.URL.Scheme == d.cfg.baseScheme {
+	if strings.EqualFold(r.URL.Host, d.cfg.baseHost) && r.URL.Scheme == d.cfg.baseScheme {
 		r.Header.Set("Authorization", "Bearer "+d.cfg.token.reveal())
+	} else {
+		r.Header.Del("Authorization")
 	}
 	r.Header.Set("User-Agent", userAgent())
 
 	resp, err := d.cfg.httpClient.Do(r)
 	if err != nil {
-		return outcome{err: err, sent: connected.Load(), took: time.Since(started)}
+		unsent := handshakeFailed.Load() || (asked.Load() && !connected.Load()) || connectionSetupFailure(err)
+		return outcome{err: err, sent: !unsent, took: time.Since(started)}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, d.limit+1))
@@ -155,6 +236,27 @@ func (d *doer) attempt(parent context.Context, req *http.Request) outcome {
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	resp.ContentLength = int64(len(body))
 	return outcome{resp: resp, body: body, sent: true, took: time.Since(started)}
+}
+
+// connectionSetupFailure reports whether err proves the request never left: DNS, dial and TLS
+// certificate or handshake-framing failures. Anything else may have happened after the body was written.
+func connectionSetupFailure(err error) bool {
+	var dnsErr *net.DNSError
+	var opErr *net.OpError
+	var verifyErr *tls.CertificateVerificationError
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	var record tls.RecordHeaderError
+	switch {
+	case errors.As(err, &dnsErr), errors.As(err, &verifyErr), errors.As(err, &unknownAuthority),
+		errors.As(err, &hostname), errors.As(err, &invalid), errors.As(err, &record):
+		return true
+	case errors.As(err, &opErr):
+		return opErr.Op == "dial"
+	default:
+		return false
+	}
 }
 
 // statusRetry decides whether an error answer is retried and how long to wait first.
@@ -195,7 +297,7 @@ func (d *doer) statusRetry(class retryClass, state *retryState, failure *Error, 
 }
 
 func (d *doer) aborted(cause error) *Error {
-	return newSDKError(KindAbort, "aborted", "The request was cancelled.", cause, d.red)
+	return newSDKError(KindAbort, "aborted", "The request was cancelled.", cause, d.red, hintInputs{})
 }
 
 // networkFailure is the error for an attempt that got no answer and will not be retried. When the
@@ -207,9 +309,9 @@ func (d *doer) networkFailure(class retryClass, req *http.Request, out outcome) 
 	}
 	message := "The request to the Hushscript API failed."
 	if errors.Is(out.err, context.DeadlineExceeded) {
-		message = fmt.Sprintf("The request to the Hushscript API timed out after %s.", d.cfg.timeout)
+		message = fmt.Sprintf("The request to the Hushscript API timed out after %s.", d.timeoutFor(req.Context()))
 	}
-	return newSDKError(KindNetwork, "network_error", message, out.err, d.red)
+	return newSDKError(KindNetwork, "network_error", message, out.err, d.red, hintInputs{})
 }
 
 // outcomeUnknown is the error for a claim, rotate or signup whose request was sent and whose answer
@@ -217,11 +319,11 @@ func (d *doer) networkFailure(class retryClass, req *http.Request, out outcome) 
 // rotate carry the hints of spec section 7.4; signup has none.
 func (d *doer) outcomeUnknown(req *http.Request, cause error) *Error {
 	failure := newSDKError(KindOutcomeUnknown, "outcome_unknown",
-		"The request was sent but no response arrived, so its outcome is unknown.", cause, d.red)
-	switch {
-	case strings.HasSuffix(req.URL.Path, "/claim"):
+		"The request was sent but no response arrived, so its outcome is unknown.", cause, d.red, hintInputs{})
+	switch path := req.URL.EscapedPath(); {
+	case strings.HasSuffix(path, "/claim"):
 		failure.Hint = claimOutcomeHint
-	case strings.HasSuffix(req.URL.Path, "/credentials/rotate"):
+	case strings.HasSuffix(path, "/credentials/rotate"):
 		failure.Hint = rotateOutcomeHint
 	default:
 		failure.Hint = ""

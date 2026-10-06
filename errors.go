@@ -2,9 +2,11 @@ package hushscript
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"math"
 	"net/http"
+	"net/url"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -105,6 +107,8 @@ type Error struct {
 	Message string
 
 	cause error
+	// causeText is the cause in one redacted line for Error(), set for network failures only.
+	causeText string
 }
 
 // Error returns the code, the message and the hint, with the token redacted.
@@ -121,37 +125,98 @@ func (e *Error) Error() string {
 		b.WriteString(e.Hint)
 		b.WriteString(")")
 	}
+	if e.causeText != "" {
+		b.WriteString(" (cause: ")
+		b.WriteString(e.causeText)
+		b.WriteString(")")
+	}
 	return b.String()
 }
 
 // Unwrap returns the error that caused this one, for errors.Is and errors.As.
 func (e *Error) Unwrap() error { return e.cause }
 
-// redactedCause keeps the original error reachable for errors.Is and errors.As while its text is
-// redacted.
+// redactedCause keeps the original error reachable for errors.Is and errors.As while everything a
+// caller can read from it is redacted. It has no Unwrap, because one more step down the chain would
+// return the raw error; Is and As look inside it instead, and As hands out only an error whose whole
+// chain is free of the token (a transport that echoes request headers into its errors gets withheld).
 type redactedCause struct {
 	text string
 	err  error
+	r    redactor
+}
+
+func newRedactedCause(cause error, r redactor) *redactedCause {
+	return &redactedCause{text: r.apply(cause.Error()), err: cause, r: r}
 }
 
 func (c *redactedCause) Error() string { return c.text }
 
-func (c *redactedCause) Unwrap() error { return c.err }
+func (c *redactedCause) Is(target error) bool { return errors.Is(c.err, target) }
 
-// newSDKError builds an error the SDK raises itself. The hint comes from the shared hints table by code.
-func newSDKError(kind ErrorKind, code, message string, cause error, r redactor) *Error {
+func (c *redactedCause) As(target any) bool {
+	pointer := reflect.ValueOf(target)
+	if pointer.Kind() != reflect.Pointer || pointer.IsNil() {
+		return false
+	}
+	scratch := reflect.New(pointer.Type().Elem())
+	if !errors.As(c.err, scratch.Interface()) {
+		return false
+	}
+	if found, ok := scratch.Elem().Interface().(error); ok && !c.clean(found) {
+		return false
+	}
+	pointer.Elem().Set(scratch.Elem())
+	return true
+}
+
+// clean reports whether no error in the chain from err down prints anything redaction would change.
+func (c *redactedCause) clean(err error) bool {
+	if err == nil {
+		return true
+	}
+	if c.r.apply(err.Error()) != err.Error() {
+		return false
+	}
+	switch wrapped := err.(type) { //nolint:errorlint // walking the chain by hand is the point
+	case interface{ Unwrap() error }:
+		return c.clean(wrapped.Unwrap())
+	case interface{ Unwrap() []error }:
+		for _, inner := range wrapped.Unwrap() {
+			if !c.clean(inner) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// causeSummary is the cause as one line for Error(): a *url.Error without its URL, which for a
+// direct upload carries a signature.
+func causeSummary(cause error) string {
+	var urlErr *url.Error
+	if errors.As(cause, &urlErr) && urlErr.Err != nil {
+		return urlErr.Op + ": " + urlErr.Err.Error()
+	}
+	return cause.Error()
+}
+
+// newSDKError builds an error the SDK raises itself. The hint comes from the shared hints table by
+// code, rendered from inputs.
+func newSDKError(kind ErrorKind, code, message string, cause error, r redactor, inputs hintInputs) *Error {
 	e := &Error{Code: code, Kind: kind, Message: r.apply(message), Details: map[string]any{}}
 	if cause != nil {
-		e.cause = &redactedCause{text: r.apply(cause.Error()), err: cause}
+		e.cause = newRedactedCause(cause, r)
+		if kind == KindNetwork || kind == KindOutcomeUnknown {
+			e.causeText = r.apply(causeSummary(cause))
+		}
 	}
-	if template, ok := generated.Hint(code); ok {
-		e.Hint = r.apply(fillHint(template, nil))
-	}
+	e.Hint = r.apply(renderHint(code, inputs))
 	return e
 }
 
-// errorFromResponse builds the error for a non-2xx answer. method and path locate the operation, so
-// that the hint can name the scope it needs.
+// errorFromResponse builds the error for a non-2xx answer. method and path (the escaped path) locate
+// the operation, so that the hint can name the scope it needs.
 func errorFromResponse(status int, header http.Header, body []byte, method, path string, r redactor) *Error {
 	e := &Error{Status: status, Details: map[string]any{}}
 	var raw map[string]any
@@ -185,10 +250,17 @@ func errorFromResponse(status int, header http.Header, body []byte, method, path
 		}
 	}
 	e.Kind = kindFor(slug, status)
-	e.RetryAfter = retryAfterOf(header, e.Details)
-	if template, ok := generated.Hint(slug); ok {
-		e.Hint = r.apply(fillHint(template, hintValues(e, method, path)))
+	inputs := hintInputsFromDetails(e.Details)
+	if operation := operationOf(method, path); operation != "" {
+		if scope, ok := generated.RequiredScope(operation); ok {
+			inputs.scope = some(scope)
+		}
 	}
+	if wait, ok := retryAfterOf(header, inputs); ok {
+		e.RetryAfter = wait
+		inputs.retryAfterSeconds = some(float64(wait / time.Second))
+	}
+	e.Hint = r.apply(renderHint(slug, inputs))
 	return e
 }
 
@@ -215,17 +287,6 @@ func plainJSON(v any) any {
 	default:
 		return v
 	}
-}
-
-// camelCase turns an API key into the name hint placeholders use ("needed_seconds" is "neededSeconds").
-func camelCase(snake string) string {
-	parts := strings.Split(snake, "_")
-	for i := 1; i < len(parts); i++ {
-		if parts[i] != "" {
-			parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
-		}
-	}
-	return strings.Join(parts, "")
 }
 
 // kindFor maps a slug, then a status, to an error kind (spec section 9.2).
@@ -259,15 +320,15 @@ func kindFor(slug string, status int) ErrorKind {
 }
 
 // retryAfterOf reads Retry-After (integer seconds) and falls back to the retry_after_seconds detail.
-func retryAfterOf(header http.Header, details map[string]any) time.Duration {
-	if seconds, ok := parseRetryAfter(header); ok {
-		return seconds
+// The second result says whether a wait was given at all: a wait of zero is still a wait.
+func retryAfterOf(header http.Header, inputs hintInputs) (time.Duration, bool) {
+	if wait, ok := parseRetryAfter(header); ok {
+		return wait, true
 	}
-	nested, _ := details["details"].(map[string]any)
-	if seconds, ok := nested["retry_after_seconds"].(float64); ok && seconds > 0 {
-		return time.Duration(seconds * float64(time.Second))
+	if seconds, ok := inputs.retryAfterSeconds.get(); ok {
+		return time.Duration(seconds * float64(time.Second)), true
 	}
-	return 0
+	return 0, false
 }
 
 func parseRetryAfter(header http.Header) (time.Duration, bool) {
@@ -282,56 +343,119 @@ func parseRetryAfter(header http.Header) (time.Duration, bool) {
 	return time.Duration(seconds) * time.Second, true
 }
 
-// hintValues collects what a hint template may mention: every detail by its camelCase name, the
-// operation's scope, the balance in minutes and the wait.
-func hintValues(e *Error, method, path string) map[string]string {
-	values := map[string]string{}
-	addValues := func(details map[string]any) {
-		for key, value := range details {
-			if _, nested := value.(map[string]any); !nested {
-				values[camelCase(key)] = formatDetail(value)
+// maybe is a value that may be absent. Zero is a legitimate value ("retry after 0 s"), so presence
+// is tracked apart from it.
+type maybe[T any] struct {
+	value T
+	ok    bool
+}
+
+func some[T any](value T) maybe[T] { return maybe[T]{value: value, ok: true} }
+
+func (m maybe[T]) get() (T, bool) { return m.value, m.ok }
+
+// hintInputs is everything a hint template may mention, with the units the API uses.
+type hintInputs struct {
+	scope             maybe[string]
+	neededSeconds     maybe[float64]
+	balanceSeconds    maybe[float64]
+	usedSeconds       maybe[float64]
+	maxSeconds        maybe[float64]
+	retryAfterSeconds maybe[float64]
+	allowedPacks      maybe[[]string]
+	currentVersion    maybe[string]
+}
+
+// hintInputsFromDetails reads the hint inputs from a body's extra keys, at the top level and inside a
+// nested "details" object (the nested one wins).
+func hintInputsFromDetails(details map[string]any) hintInputs {
+	var in hintInputs
+	read := func(level map[string]any) {
+		number := func(key string, into *maybe[float64]) {
+			if value, ok := asFloat(level[key]); ok && value >= 0 {
+				*into = some(value)
 			}
 		}
-	}
-	addValues(e.Details)
-	if nested, ok := e.Details["details"].(map[string]any); ok {
-		addValues(nested)
-	}
-	if operation := operationOf(method, path); operation != "" {
-		if scope, ok := generated.RequiredScope(operation); ok {
-			values["scope"] = scope
+		number("needed_seconds", &in.neededSeconds)
+		number("balance_seconds", &in.balanceSeconds)
+		number("used_seconds", &in.usedSeconds)
+		number("max_seconds", &in.maxSeconds)
+		number("retry_after_seconds", &in.retryAfterSeconds)
+		if packs, ok := level["allowed_packs"].([]any); ok {
+			var names []string
+			for _, pack := range packs {
+				if name, isString := pack.(string); isString {
+					names = append(names, name)
+				}
+			}
+			if len(names) > 0 {
+				in.allowedPacks = some(names)
+			}
+		}
+		if version, ok := level["current_version"].(string); ok && version != "" {
+			in.currentVersion = some(version)
 		}
 	}
-	// Seconds shown as minutes: what is needed rounds up, what the user has rounds down.
-	if seconds, ok := e.Details["needed_seconds"].(float64); ok {
-		values["needed"] = strconv.Itoa(int(math.Ceil(seconds / secondsPerMinute)))
+	read(details)
+	if nested, ok := details["details"].(map[string]any); ok {
+		read(nested)
 	}
-	if seconds, ok := e.Details["balance_seconds"].(float64); ok {
-		values["balance"] = strconv.Itoa(int(math.Floor(seconds / secondsPerMinute)))
+	return in
+}
+
+func asFloat(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case int:
+		return float64(typed), true
+	case json.Number:
+		f, err := typed.Float64()
+		return f, err == nil
+	default:
+		return 0, false
 	}
-	if e.RetryAfter > 0 {
-		values["retryAfter"] = strconv.Itoa(int(e.RetryAfter / time.Second))
-	}
-	return values
 }
 
 const secondsPerMinute = 60
 
-func formatDetail(value any) string {
-	switch typed := value.(type) {
-	case string:
-		return typed
-	case float64:
-		return strconv.FormatFloat(typed, 'f', -1, 64)
-	case []any:
-		parts := make([]string, len(typed))
-		for i, item := range typed {
-			parts[i] = formatDetail(item)
+// hintValues turns the inputs into the placeholder values of spec section 9.3. Minutes: what is
+// needed rounds up, what the user has or has used rounds down, so the hint never overstates.
+func hintValues(in hintInputs) map[string]string {
+	values := map[string]string{}
+	whole := func(number float64) string { return strconv.FormatFloat(number, 'f', 0, 64) }
+	minutes := func(name string, seconds maybe[float64], round func(float64) float64) {
+		if value, ok := seconds.get(); ok {
+			values[name] = whole(round(value / secondsPerMinute))
 		}
-		return strings.Join(parts, ", ")
-	default:
-		return fmt.Sprint(typed)
 	}
+	minutes("needed", in.neededSeconds, math.Ceil)
+	minutes("balance", in.balanceSeconds, math.Floor)
+	minutes("used", in.usedSeconds, math.Floor)
+	minutes("max", in.maxSeconds, math.Floor)
+	if value, ok := in.retryAfterSeconds.get(); ok {
+		values["retryAfter"] = whole(math.Floor(value))
+	}
+	if value, ok := in.scope.get(); ok {
+		values["scope"] = value
+	}
+	if value, ok := in.allowedPacks.get(); ok {
+		values["allowedPacks"] = strings.Join(value, ", ")
+	}
+	if value, ok := in.currentVersion.get(); ok {
+		values["currentVersion"] = value
+	}
+	return values
+}
+
+// renderHint is the hint of a slug rendered from its inputs, or "" when the slug has none or no
+// sentence of it can be filled.
+func renderHint(slug string, in hintInputs) string {
+	template, ok := generated.Hint(slug)
+	if !ok {
+		return ""
+	}
+	return fillHint(template, hintValues(in))
 }
 
 var placeholder = regexp.MustCompile(`\{([A-Za-z]+)\}`)

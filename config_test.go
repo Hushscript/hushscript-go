@@ -18,10 +18,13 @@ func TestRefusesConstructionWithoutATokenAndSaysWhereToGetOne(t *testing.T) {
 	if apiErr.Kind != KindConfiguration || apiErr.Code != "config_invalid" {
 		t.Fatalf("kind %v code %q", apiErr.Kind, apiErr.Code)
 	}
-	for _, want := range []string{"HUSHSCRIPT_TOKEN", "Account", "Connected apps", "app.hushscript.com/account/mcp"} {
-		if !strings.Contains(apiErr.Message, want) {
-			t.Errorf("message %q lacks %q", apiErr.Message, want)
-		}
+	if !strings.Contains(apiErr.Message, "HUSHSCRIPT_TOKEN") {
+		t.Errorf("message %q does not name the variable", apiErr.Message)
+	}
+	wantHint := "Set HUSHSCRIPT_TOKEN or pass a token. Create one in the Hushscript app: " +
+		"Account → Connected apps (app.hushscript.com/account/mcp)."
+	if apiErr.Hint != wantHint {
+		t.Errorf("hint = %q, want the spec section 3 text", apiErr.Hint)
 	}
 	if apiErr.Status != 0 || apiErr.NumericCode != 0 {
 		t.Errorf("an SDK-side error carries no status or numeric code: %+v", apiErr)

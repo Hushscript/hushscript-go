@@ -14,12 +14,14 @@ sandbox := "--rm --init --label sdk.test=1 --cap-drop ALL --read-only --security
 floor := "1.25"
 latest := "1.26"
 
-# unit tests with the race detector and the coverage floor on Go 1.25 (default) or 1.26; no network beyond the mock
+# unit tests with the race detector and the coverage floor on Go 1.25 (default) or 1.26; no network beyond the mock (the hint tests read the conformance fixtures: CONFORMANCE_DIR, else CONFORMANCE_CONTEXT, else a clone of the pinned tag)
 test version=floor:
     #!/usr/bin/env bash
     set -euo pipefail
     {{ if version == "1.25" { "" } else if version == "1.26" { "" } else { error("version must be 1.25 or 1.26") } }}
     export GO_VERSION={{version}}
+    CONFORMANCE_DIR="$(scripts/conformance-dir.sh)"
+    export CONFORMANCE_DIR
     trap 'docker compose down --remove-orphans >/dev/null 2>&1 || true' EXIT
     docker compose build mock test
     docker compose run --rm test
@@ -30,6 +32,8 @@ mutation version=floor:
     set -euo pipefail
     {{ if version == "1.25" { "" } else if version == "1.26" { "" } else { error("version must be 1.25 or 1.26") } }}
     export GO_VERSION={{version}}
+    CONFORMANCE_DIR="$(scripts/conformance-dir.sh)"
+    export CONFORMANCE_DIR
     trap 'docker compose down --remove-orphans >/dev/null 2>&1 || true' EXIT
     docker compose build mock mutation
     docker compose run --rm mutation
