@@ -397,7 +397,7 @@ func TestResumeOpensItsPathOnlyWhileTheJobIsUploading(t *testing.T) {
 	}
 
 	other := filepath.Join(t.TempDir(), "other.wav")
-	if err := os.WriteFile(other, testWAV(21), 0o600); err != nil {
+	if err = os.WriteFile(other, testWAV(21), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	before := r.api.total()
@@ -408,14 +408,14 @@ func TestResumeOpensItsPathOnlyWhileTheJobIsUploading(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "same.wav")
-	if err := os.WriteFile(path, r.wav, 0o600); err != nil {
+	if err = os.WriteFile(path, r.wav, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	r.api.mu.Lock()
 	r.api.jobStates, r.api.jobReads = []string{"uploading", "processing", "done"}, 0
 	r.api.mu.Unlock()
-	if got, err := r.client.Resume(context.Background(), token, &ResumeOptions{Path: path}); err != nil || got.ID != "tr_1" {
-		t.Fatalf("Resume with the original file as a Path = %v, %v", got, err)
+	if got, resumeErr := r.client.Resume(context.Background(), token, &ResumeOptions{Path: path}); resumeErr != nil || got.ID != "tr_1" {
+		t.Fatalf("Resume with the original file as a Path = %v, %v", got, resumeErr)
 	}
 }
 
