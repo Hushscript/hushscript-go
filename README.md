@@ -36,8 +36,8 @@ API document leaves out (`signup_id` on the claim operation), in a private copy 
 
 ### Accepted deviations from the SDK specification
 
-- `fieldalignment` is off in `.golangci.yml`: `Error` lists its fields in the order of the spec's
-  field table, and struct layouts here are for readers, not for padding.
+- `fieldalignment` is off in `.golangci.yml`: struct layouts here, `Error` included, are ordered for
+  readers, not for padding.
 - The Scorecard workflow has `id-token: write`, which section 13.3 allows only for publishing:
   Scorecard needs it to publish its results.
 - The `audit` compose service has outbound network access, next to `regen` and `smoke`: `go mod tidy
