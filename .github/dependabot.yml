@@ -1,0 +1,37 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    ignore:
+      # These tools need Go 1.26 in their go.mod, which would raise the module's go line above the 1.25 floor.
+      - dependency-name: mvdan.cc/gofumpt
+        versions: [">=0.12.0"]
+      - dependency-name: golang.org/x/vuln
+        versions: [">=1.8.0"]
+      - dependency-name: golang.org/x/exp
+      - dependency-name: github.com/avito-tech/go-mutesting
+    commit-message:
+      prefix: chore
+      include: scope
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
+      include: scope
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
+      include: scope

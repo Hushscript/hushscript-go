@@ -1,0 +1,8 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/oapi-codegen/oapi-codegen/HEAD/configuration-schema.json
+# The spec reaches oapi-codegen through scripts/generate.go, which declares path parameters the API
+# document leaves out; run it with `just regen`.
+package: generated
+output: generated/client.gen.go
+generate:
+  models: true
+  client: true
