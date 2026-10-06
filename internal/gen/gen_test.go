@@ -1,6 +1,7 @@
 package gen_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"strings"
@@ -12,7 +13,7 @@ import (
 
 func readRepoFile(t *testing.T, name string) []byte {
 	t.Helper()
-	content, err := os.ReadFile("../../" + name)
+	content, err := os.ReadFile("../../" + name) //nolint:gosec // test reads fixed repository files
 	if err != nil {
 		t.Fatalf("reading %s: %v", name, err)
 	}
@@ -43,14 +44,14 @@ func TestReproducesTheCommittedCatalogAndScopesFromTheCommittedSpec(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(catalog) != string(readRepoFile(t, "generated/catalog.go")) {
+	if !bytes.Equal(catalog, readRepoFile(t, "generated/catalog.go")) {
 		t.Error("generated/catalog.go differs from what the committed spec emits; run just regen")
 	}
 	scopes, err := gen.EmitScopes(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(scopes) != string(readRepoFile(t, "generated/scopes.go")) {
+	if !bytes.Equal(scopes, readRepoFile(t, "generated/scopes.go")) {
 		t.Error("generated/scopes.go differs from what the committed spec emits; run just regen")
 	}
 }
@@ -65,7 +66,7 @@ func TestReproducesTheCommittedHintsFromTheirOwnTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(emitted) != string(readRepoFile(t, "generated/hints.go")) {
+	if !bytes.Equal(emitted, readRepoFile(t, "generated/hints.go")) {
 		t.Error("generated/hints.go differs from what its own table emits")
 	}
 }

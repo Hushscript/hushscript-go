@@ -106,9 +106,9 @@ func generateClient(ctx context.Context, patched []byte) error {
 	if err != nil {
 		return fmt.Errorf("creating a temporary directory: %w", err)
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 	specPath := filepath.Join(dir, "openapi.json")
-	if err := os.WriteFile(specPath, patched, 0o600); err != nil {
+	if err := os.WriteFile(specPath, patched, 0o600); err != nil { //nolint:gosec // the path is inside the directory this process just created
 		return fmt.Errorf("writing the patched spec: %w", err)
 	}
 	command := exec.CommandContext(ctx, "go", "tool", "oapi-codegen", "-config", "oapi-codegen.yaml", specPath) //nolint:gosec // fixed tool name, the only variable is a path this process just created
@@ -145,15 +145,15 @@ func readFile(path string) ([]byte, error) {
 func fetch(ctx context.Context, url string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody) //nolint:gosec // the operator names the spec URL
 	if err != nil {
 		return nil, fmt.Errorf("building the request for %s: %w", url, err)
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := http.DefaultClient.Do(request) //nolint:gosec // the operator names the spec URL
 	if err != nil {
 		return nil, fmt.Errorf("GET %s: %w", url, err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GET %s answered %d", url, response.StatusCode)
 	}

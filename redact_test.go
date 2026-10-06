@@ -21,7 +21,7 @@ func TestRedactsTheTokenAndAnythingShapedLikeOne(t *testing.T) {
 }
 
 func TestRedactsATokenThatDoesNotFollowTheCurrentFormat(t *testing.T) {
-	r := redactor{token: "hsr-future-format-token"}
+	r := redactor{token: "hsr-future-format-token"} //nolint:gosec // a made-up token for the test
 	if out := r.apply("echo hsr-future-format-token end"); strings.Contains(out, "future-format") {
 		t.Errorf("exact token survived: %q", out)
 	}

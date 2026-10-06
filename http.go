@@ -139,7 +139,7 @@ func (d *doer) attempt(parent context.Context, req *http.Request) outcome {
 	if err != nil {
 		return outcome{err: err, sent: connected.Load(), took: time.Since(started)}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err == nil && len(body) > maxResponseBytes {
 		err = errResponseTooLarge

@@ -74,23 +74,12 @@ func (k ErrorKind) String() string {
 // IsPreflight reports whether the kind belongs to the preflight family: errors raised before any
 // request that holds credit, so no hold was placed.
 func (k ErrorKind) IsPreflight() bool {
-	switch k {
-	case KindUnsupportedMedia, KindFileLimit, KindDailyLimit, KindResumeMismatch:
-		return true
-	default:
-		return false
-	}
+	return k >= KindUnsupportedMedia && k <= KindResumeMismatch
 }
 
 // IsAPI reports whether the kind is an answer from the API: ApiError and its subclasses.
 func (k ErrorKind) IsAPI() bool {
-	switch k {
-	case KindAPI, KindAuthentication, KindPermission, KindInsufficientBalance, KindNotFound,
-		KindConflict, KindValidation, KindRateLimit:
-		return true
-	default:
-		return false
-	}
+	return k == KindAPI || (k >= KindAuthentication && k <= KindRateLimit)
 }
 
 // Error is the one error type of the SDK. Match it with errors.As and branch on Kind or Code.

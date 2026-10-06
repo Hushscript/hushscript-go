@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	redactedToken = "hsr…[redacted]"
+	redactedToken = "hsr…[redacted]" //nolint:gosec // the replacement marker, not a credential
 	// minSecretTail keeps a short, ordinary substring from being redacted everywhere.
 	minSecretTail = 16
 )

@@ -168,7 +168,7 @@ func TestLoggingIsOffUnlessAskedFor(t *testing.T) {
 		t.Errorf("HUSHSCRIPT_LOG=off: logger %v, err %v", c.core.cfg.logger, err)
 	}
 	t.Setenv("HUSHSCRIPT_LOG", "verbose")
-	if _, err := New(WithToken(testToken)); err == nil {
+	if _, verboseErr := New(WithToken(testToken)); verboseErr == nil {
 		t.Error("an unknown log level was accepted")
 	}
 	own := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
@@ -198,13 +198,13 @@ func TestNeverPrintsTheToken(t *testing.T) {
 	if strings.Contains(both, testSecret) {
 		t.Error("the combined v and plus-v forms printed the token")
 	}
-	if !strings.Contains(fmt.Sprintf("%v", c), "hsr…[redacted]") {
+	if !strings.Contains(c.String(), "hsr…[redacted]") {
 		t.Errorf("the string form should show the redaction marker: %v", c)
 	}
 	if !strings.Contains(c.GoString(), "hsr…[redacted]") || !strings.Contains(cfg.GoString(), "hsr…[redacted]") {
 		t.Error("GoString should show the redaction marker")
 	}
-	if got := cfg.token.String() + cfg.token.GoString() + fmt.Sprint(cfg.token); strings.Contains(got, testSecret) {
+	if got := cfg.token.String() + cfg.token.GoString() + cfg.token.String(); strings.Contains(got, testSecret) {
 		t.Errorf("the secret type printed itself: %s", got)
 	}
 }

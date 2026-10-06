@@ -325,16 +325,15 @@ func resolveParameter(spec map[string]any, reference string) (map[string]any, er
 // returns the patched spec as JSON for the generator's private copy (openapi.json itself is never
 // touched) and the operations it changed. A declared path parameter that is not in the template is
 // an error: that is a different defect, and guessing would hide it.
-func PatchPathParameters(spec map[string]any) ([]byte, []string, error) {
+func PatchPathParameters(spec map[string]any) (patchedSpec []byte, changed []string, err error) {
 	paths, err := asObject(spec["paths"], "paths")
 	if err != nil {
 		return nil, nil, err
 	}
-	var patched []string
 	for _, path := range slices.Sorted(maps.Keys(paths)) {
-		item, err := asObject(paths[path], "paths."+path)
-		if err != nil {
-			return nil, nil, err
+		item, itemErr := asObject(paths[path], "paths."+path)
+		if itemErr != nil {
+			return nil, nil, itemErr
 		}
 		var template []string
 		for _, match := range pathVariable.FindAllStringSubmatch(path, -1) {
@@ -345,13 +344,13 @@ func PatchPathParameters(spec map[string]any) ([]byte, []string, error) {
 			if !present {
 				continue
 			}
-			operation, err := asObject(raw, method+" "+path)
-			if err != nil {
-				return nil, nil, err
+			operation, operationErr := asObject(raw, method+" "+path)
+			if operationErr != nil {
+				return nil, nil, operationErr
 			}
-			declared, err := declaredPathParameters(spec, item["parameters"], operation["parameters"])
-			if err != nil {
-				return nil, nil, err
+			declared, declaredErr := declaredPathParameters(spec, item["parameters"], operation["parameters"])
+			if declaredErr != nil {
+				return nil, nil, declaredErr
 			}
 			for _, name := range slices.Sorted(maps.Keys(declared)) {
 				if !slices.Contains(template, name) {
@@ -369,7 +368,7 @@ func PatchPathParameters(spec map[string]any) ([]byte, []string, error) {
 					"required": true,
 					"schema":   map[string]any{"type": "string"},
 				})
-				patched = append(patched, strings.ToUpper(method)+" "+path+" ("+name+")")
+				changed = append(changed, strings.ToUpper(method)+" "+path+" ("+name+")")
 			}
 		}
 	}
@@ -377,5 +376,5 @@ func PatchPathParameters(spec map[string]any) ([]byte, []string, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("re-encoding the patched spec: %w", err)
 	}
-	return text, patched, nil
+	return text, changed, nil
 }

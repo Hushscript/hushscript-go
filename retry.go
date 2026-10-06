@@ -95,41 +95,39 @@ func fullJitter(ceiling time.Duration) time.Duration {
 
 // retryBudget is how many retries a class gets in total under maxRetries.
 func retryBudget(class retryClass, maxRetries int) int {
-	switch class {
-	case classNever:
+	if class == classNever {
 		return 0
-	case classPurchase:
-		return min(maxRetries, purchaseRetries)
-	default:
-		return maxRetries
 	}
+	if class == classPurchase {
+		return min(maxRetries, purchaseRetries)
+	}
+	return maxRetries
 }
 
 // retryableStatus reports whether an answer with this status is worth another try for the class.
 func retryableStatus(class retryClass, status int) bool {
-	switch class {
-	case classSafe:
+	if class == classSafe {
 		return status == http.StatusTooManyRequests || status == http.StatusInternalServerError ||
 			status == http.StatusBadGateway || status == http.StatusServiceUnavailable ||
 			status == http.StatusGatewayTimeout
-	case classUploadCreate:
-		return status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
-	case classPurchase:
-		return status == http.StatusBadGateway || status == http.StatusServiceUnavailable
-	default:
-		return false
 	}
+	if class == classUploadCreate {
+		return status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
+	}
+	if class == classPurchase {
+		return status == http.StatusBadGateway || status == http.StatusServiceUnavailable
+	}
+	return false
 }
 
 // retryableNetworkError reports whether a failed attempt may be repeated. sent says whether the
 // request may have reached the server.
 func retryableNetworkError(class retryClass, sent bool) bool {
-	switch class {
-	case classSafe, classUploadCreate, classPurchase:
-		return true
-	case classMutate:
-		return !sent
-	default:
+	if class == classNever {
 		return false
 	}
+	if class == classMutate {
+		return !sent
+	}
+	return true
 }

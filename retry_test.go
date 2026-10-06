@@ -52,21 +52,19 @@ func TestSendsTheTokenAndTheUserAgentToTheAPIHostOnly(t *testing.T) {
 	api := newScriptedServer(t, okBody)
 	other := newScriptedServer(t, okBody)
 	c := newTestClient(t, api.URL, newFakeClock())
-	resp, err := do(t, c, http.MethodGet, "/v1/account", "")
+	_, err := do(t, c, http.MethodGet, "/v1/account", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = resp.Body.Close()
 	h := api.request(0).header
 	if h.Get("Authorization") != "Bearer "+testToken || h.Get("User-Agent") != userAgent() {
 		t.Errorf("headers = %v", h)
 	}
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPut, other.URL+"/r2/part/1", strings.NewReader("bytes"))
-	resp, err = c.core.doer.Do(req)
+	_, err = send(c, req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = resp.Body.Close()
 	if got := other.request(0).header.Get("Authorization"); got != "" {
 		t.Errorf("the token went to another host: %q", got)
 	}
@@ -83,10 +81,8 @@ func TestRetriesASafeRequestWithFullJitterBackoff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if string(body) != `{"ok":true}` || resp.StatusCode != 200 {
-		t.Errorf("response = %d %s", resp.StatusCode, body)
+	if resp.Text != `{"ok":true}` || resp.StatusCode != http.StatusOK {
+		t.Errorf("response = %d %s", resp.StatusCode, resp.Text)
 	}
 	if srv.count() != 3 {
 		t.Errorf("requests = %d", srv.count())
@@ -317,11 +313,9 @@ func TestReadsTheWholeBodyInsideTheAttemptTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
 	time.Sleep(20 * time.Millisecond)
-	body, err := io.ReadAll(resp.Body)
-	if err != nil || string(body) != `{"ok":true}` {
-		t.Errorf("body %q, err %v", body, err)
+	if resp.Text != `{"ok":true}` {
+		t.Errorf("body %q", resp.Text)
 	}
 }
 
@@ -377,7 +371,7 @@ func TestDoesNotRetryABodyItCannotReplay(t *testing.T) {
 	srv := newScriptedServer(t, step{status: 503}, okBody)
 	c := newTestClient(t, srv.URL, newFakeClock())
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPut, c.core.cfg.baseURL+"/v1/uploads/j1/parts/1", io.NopCloser(strings.NewReader("part")))
-	if _, err := c.core.doer.Do(req); err == nil || srv.count() != 1 {
+	if _, err := send(c, req); err == nil || srv.count() != 1 {
 		t.Errorf("%d requests, err %v", srv.count(), err)
 	}
 }
@@ -385,11 +379,10 @@ func TestDoesNotRetryABodyItCannotReplay(t *testing.T) {
 func TestNeverSetsAnIdempotencyKeyHeaderItself(t *testing.T) {
 	srv := newScriptedServer(t, okBody)
 	c := newTestClient(t, srv.URL, newFakeClock())
-	resp, err := do(t, c, http.MethodPost, "/v1/uploads", `{}`)
+	_, err := do(t, c, http.MethodPost, "/v1/uploads", `{}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = resp.Body.Close()
 	for key := range srv.request(0).header {
 		if strings.Contains(strings.ToLower(key), "idempotency") {
 			t.Errorf("the SDK set %s, which would make net/http replay the POST on its own", key)
@@ -412,11 +405,10 @@ func TestPacesUploadCreatesToFourPerMinute(t *testing.T) {
 	clock := newFakeClock()
 	c := newTestClient(t, srv.URL, clock)
 	for i := range 5 {
-		resp, err := do(t, c, http.MethodPost, "/v1/uploads", `{}`)
+		_, err := do(t, c, http.MethodPost, "/v1/uploads", `{}`)
 		if err != nil {
 			t.Fatalf("create %d: %v", i, err)
 		}
-		_ = resp.Body.Close()
 	}
 	if srv.count() != 5 {
 		t.Fatalf("requests = %d", srv.count())
@@ -424,11 +416,10 @@ func TestPacesUploadCreatesToFourPerMinute(t *testing.T) {
 	if got := clock.slept(); len(got) != 1 || got[0] != time.Minute {
 		t.Errorf("the fifth create should wait one window: sleeps %v", got)
 	}
-	resp, err := do(t, c, http.MethodGet, "/v1/account", "")
+	_, err := do(t, c, http.MethodGet, "/v1/account", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = resp.Body.Close()
 	if len(clock.slept()) != 1 {
 		t.Error("only creates are paced")
 	}
@@ -464,11 +455,10 @@ func TestBacksOffFifteenThirtySixtyWhenACreateIsRateLimitedWithoutRetryAfter(t *
 	srv := newScriptedServer(t, rateLimited(nil), rateLimited(nil), rateLimited(nil), okBody)
 	clock := newFakeClock()
 	c := newTestClient(t, srv.URL, clock)
-	resp, err := do(t, c, http.MethodPost, "/v1/uploads", `{"idempotency_key":"k"}`)
+	_, err := do(t, c, http.MethodPost, "/v1/uploads", `{"idempotency_key":"k"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = resp.Body.Close()
 	want := []time.Duration{15 * time.Second, 30 * time.Second, 60 * time.Second}
 	got := clock.slept()
 	if srv.count() != 4 || len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
@@ -553,11 +543,10 @@ func TestLogsOneMetadataLinePerAttemptAndNothingElse(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	c := newTestClient(t, srv.URL, newFakeClock(), WithLogger(logger))
-	resp, err := doContext(context.Background(), t, c, http.MethodPost, "/v1/uploads/j1/complete?sig=SECRETSIG", `{"title":"private title"}`)
+	_, err := doContext(context.Background(), t, c, http.MethodPost, "/v1/uploads/j1/complete?sig=SECRETSIG", `{"title":"private title"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = resp.Body.Close()
 	out := buf.String()
 	if lines := strings.Count(strings.TrimSpace(out), "\n") + 1; lines != 2 {
 		t.Fatalf("expected 2 lines, got %d:\n%s", lines, out)
@@ -586,13 +575,13 @@ func TestLogsNetworkFailuresAndHidesForeignURLs(t *testing.T) {
 	buf.Reset()
 	c = newTestClient(t, other.URL, newFakeClock(), WithLogger(logger))
 	req, _ := http.NewRequestWithContext(withLogLabel(context.Background(), "r2:part/3"), http.MethodPut, "http://127.0.0.1:1/bucket/key?X-Amz-Signature=SIG", strings.NewReader("x"))
-	_, _ = c.core.doer.Do(req)
+	_, _ = send(c, req)
 	if !strings.Contains(buf.String(), "path=r2:part/3") || strings.Contains(buf.String(), "SIG") || strings.Contains(buf.String(), "bucket") {
 		t.Errorf("a direct URL must be logged by its label only:\n%s", buf.String())
 	}
 	buf.Reset()
 	req, _ = http.NewRequestWithContext(context.Background(), http.MethodPut, "http://127.0.0.1:1/bucket/key?X-Amz-Signature=SIG", strings.NewReader("x"))
-	_, _ = c.core.doer.Do(req)
+	_, _ = send(c, req)
 	if strings.Contains(buf.String(), "SIG") || strings.Contains(buf.String(), "bucket") {
 		t.Errorf("an unlabeled foreign URL must not be logged:\n%s", buf.String())
 	}
@@ -601,9 +590,8 @@ func TestLogsNetworkFailuresAndHidesForeignURLs(t *testing.T) {
 func TestIsSilentWithoutALogger(t *testing.T) {
 	srv := newScriptedServer(t, okBody)
 	c := newTestClient(t, srv.URL, newFakeClock())
-	resp, err := do(t, c, http.MethodGet, "/v1/account", "")
+	_, err := do(t, c, http.MethodGet, "/v1/account", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = resp.Body.Close()
 }

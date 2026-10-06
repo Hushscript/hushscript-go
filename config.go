@@ -134,9 +134,9 @@ func newConfigError(message string) *Error {
 	return newSDKError(KindConfiguration, "config_invalid", message, nil, redactor{})
 }
 
-func validateBaseURL(raw string) (string, string, error) {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" || parsed.Hostname() == "" {
+func validateBaseURL(raw string) (validated, host string, err error) {
+	parsed, parseErr := url.Parse(raw)
+	if parseErr != nil || parsed.Host == "" || parsed.Hostname() == "" {
 		return "", "", newConfigError("The base URL is not a valid URL.")
 	}
 	switch parsed.Scheme {

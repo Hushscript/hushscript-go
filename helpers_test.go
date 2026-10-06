@@ -53,14 +53,6 @@ func (c *fakeClock) slept() []time.Duration {
 	return append([]time.Duration(nil), c.sleeps...)
 }
 
-func (c *fakeClock) total() time.Duration {
-	var sum time.Duration
-	for _, d := range c.slept() {
-		sum += d
-	}
-	return sum
-}
-
 // step is one scripted answer of the test server.
 type step struct {
 	status  int
@@ -100,9 +92,10 @@ func newScriptedServer(t *testing.T, steps ...step) *scriptedServer {
 		s.mu.Unlock()
 		current := steps[min(index, len(steps)-1)]
 		if current.drop {
-			conn, _, err := w.(http.Hijacker).Hijack()
-			if err == nil {
-				_ = conn.Close()
+			if hijacker, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hijacker.Hijack(); err == nil {
+					_ = conn.Close()
+				}
 			}
 			return
 		}
@@ -138,7 +131,7 @@ func (s *scriptedServer) request(i int) recorded {
 // deadAddress is a loopback address that refuses connections.
 func deadAddress(t *testing.T) string {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,12 +163,12 @@ func newTestClient(t *testing.T, baseURL string, clock Clock, opts ...Option) *C
 	return c
 }
 
-func do(t *testing.T, c *Client, method, path string, body string) (*http.Response, error) {
+func do(t *testing.T, c *Client, method, path, body string) (reply, error) {
 	t.Helper()
 	return doContext(context.Background(), t, c, method, path, body)
 }
 
-func doContext(ctx context.Context, t *testing.T, c *Client, method, path, body string) (*http.Response, error) {
+func doContext(ctx context.Context, t *testing.T, c *Client, method, path, body string) (reply, error) {
 	t.Helper()
 	var reader io.Reader = http.NoBody
 	if body != "" {
@@ -185,7 +178,23 @@ func doContext(ctx context.Context, t *testing.T, c *Client, method, path, body 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return c.core.doer.Do(req)
+	return send(c, req)
+}
+
+// reply is a 2xx answer with its body already read, so tests never hold an open response.
+type reply struct {
+	StatusCode int
+	Text       string
+}
+
+func send(c *Client, req *http.Request) (reply, error) {
+	resp, err := c.core.doer.Do(req)
+	if err != nil {
+		return reply{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	return reply{StatusCode: resp.StatusCode, Text: string(body)}, err
 }
 
 func asError(t *testing.T, err error) *Error {
