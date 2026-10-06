@@ -27,6 +27,9 @@ type core struct {
 	cfg  config
 	doer *doer
 	api  *generated.ClientWithResponses
+
+	// uploadTrace is a test seam: the uploader reports its fallback decisions through it.
+	uploadTrace func(event string, part int)
 }
 
 // New builds a Client from the options, the environment and the defaults (see the With options).

@@ -180,3 +180,83 @@ func TestACanceledContextBeforeTheCreateIsAnAbortWithoutAToken(t *testing.T) {
 		t.Errorf("error %+v, creates %d", e, r.api.count("create"))
 	}
 }
+
+// A part that fails on R2 may fall back to the API only while no direct PUT has succeeded. The
+// fallback decision and a concurrent direct success are interleaved by hand: the failing part waits
+// at the decision until the other part has finished its direct PUT.
+func TestAFallbackDecidedBeforeAConcurrentDirectSuccessNeverTurnsTheJobProxied(t *testing.T) {
+	clock := newVirtualClock()
+	api := newFakeAPI(t, clock)
+	api.partSize = testPartSize
+	clock.run(t, api)
+	client := pipelineClient(t, api, clock, WithMaxRetries(0))
+	wav := testWAV(20)
+
+	inWindow := make(chan struct{})
+	directDone := make(chan struct{})
+	var windowOnce, doneOnce sync.Once
+	client.core.uploadTrace = func(event string, part int) {
+		switch {
+		case event == "fallback" && part == 1:
+			windowOnce.Do(func() { close(inWindow) })
+			<-directDone
+		case event == "direct-done" && part == 2:
+			doneOnce.Do(func() { close(directDone) })
+		}
+	}
+	api.setHook(func(s *seen) (int, string, bool) {
+		switch {
+		case s.route == "r2" && s.n == 1:
+			return 500, "down", true
+		case s.route == "r2" && s.n == 2:
+			select { // part 2 answers only once part 1 is deciding
+			case <-inWindow:
+			case <-time.After(10 * time.Second):
+			}
+		}
+		return 0, "", false
+	})
+	_, err := client.TranscribeReader(context.Background(), bytes.NewReader(wav), int64(len(wav)), &TranscribeOptions{Concurrency: 2})
+	_ = wantCode(t, err, KindUpload, "parts_exhausted")
+	if n := api.count("complete"); n != 0 {
+		t.Errorf("%d complete requests after a failed part; a body-less complete would miss the direct parts", n)
+	}
+}
+
+// The other order: the fallback wins the swap while a direct PUT is still on its way to being recorded.
+// That part's R2 copy is not in the job's part list, so it is sent through the API again.
+func TestADirectSuccessThatLosesTheSwapToAFallbackIsSentThroughTheAPIAgain(t *testing.T) {
+	clock := newVirtualClock()
+	api := newFakeAPI(t, clock)
+	api.partSize = testPartSize
+	clock.run(t, api)
+	client := pipelineClient(t, api, clock, WithMaxRetries(0))
+	wav := testWAV(20)
+
+	client.core.uploadTrace = func(event string, part int) {
+		if event == "direct-success" && part == 2 {
+			for deadline := time.Now().Add(10 * time.Second); api.count("part") < 1 && time.Now().Before(deadline); { // part 1 is already going through the API
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}
+	api.setHook(func(s *seen) (int, string, bool) {
+		if s.route == "r2" && s.n == 1 {
+			return 500, "down", true
+		}
+		return 0, "", false
+	})
+	if _, err := client.TranscribeReader(context.Background(), bytes.NewReader(wav), int64(len(wav)), &TranscribeOptions{Concurrency: 2}); err != nil {
+		t.Fatalf("transcribe: %v", err)
+	}
+	sent := map[int]bool{}
+	for _, s := range api.requests("part") {
+		sent[s.n] = true
+	}
+	if len(sent) != 4 || !sent[2] {
+		t.Errorf("parts sent through the API = %v, want all four including part 2", sent)
+	}
+	if body := api.requests("complete")[0].body; len(body) != 0 {
+		t.Errorf("a proxied job completed with a body: %s", body)
+	}
+}
