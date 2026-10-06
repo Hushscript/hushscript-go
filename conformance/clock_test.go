@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,11 @@ func (c *virtualClock) Sleep(ctx context.Context, d time.Duration) error {
 		c.activity.Add(1)
 		return nil
 	case <-ctx.Done():
+		// A cancelled sleep no longer waits for time: its timer must not hold the driver back.
+		c.mu.Lock()
+		c.timers = slices.DeleteFunc(c.timers, func(other *timer) bool { return other == t })
+		c.mu.Unlock()
+		c.activity.Add(1)
 		return ctx.Err()
 	}
 }

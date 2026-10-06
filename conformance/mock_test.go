@@ -92,8 +92,34 @@ func (m *mockClient) state(ctx context.Context) (mockState, error) {
 	return state, err
 }
 
-func (m *mockClient) advance(ctx context.Context, by time.Duration) error {
-	return m.do(ctx, http.MethodPost, "/__clock", map[string]float64{"advance": by.Seconds()}, nil)
+// advance moves the mock clock by exactly by and returns the clock it reports, in mock seconds.
+func (m *mockClient) advance(ctx context.Context, by time.Duration) (float64, error) {
+	var reply struct {
+		Now float64 `json:"now"`
+	}
+	err := m.do(ctx, http.MethodPost, "/__clock", map[string]float64{"advance": by.Seconds()}, &reply)
+	return reply.Now, err
+}
+
+// file downloads one file the mock serves (scenarios, fixtures, hints).
+func (m *mockClient) file(ctx context.Context, path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mockBaseURL+path, http.NoBody)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := m.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET %s answered %d", path, resp.StatusCode)
+	}
+	return data, nil
 }
 
 type verdict struct {
