@@ -1,0 +1,153 @@
+name: hushscript-go
+
+x-hardening: &hardening
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  mem_limit: 4g
+  pids_limit: 512
+  labels:
+    sdk.test: "1"
+
+x-dev-build: &dev-build
+  context: .
+  dockerfile: docker/dev.Dockerfile
+  target: dev
+  args:
+    GO_VERSION: ${GO_VERSION:?set by the justfile}
+
+x-dev: &dev
+  <<: *hardening
+  build: *dev-build
+  image: hushscript-go-dev:go${GO_VERSION:?set by the justfile}
+  working_dir: /work
+
+# Go compiles test binaries and tools into /tmp, so it must be executable.
+x-scratch: &scratch
+  - /tmp:exec,mode=1777,size=3g
+
+x-sandboxed: &sandboxed
+  <<: *dev
+  network_mode: "service:mock"
+  depends_on:
+    mock:
+      condition: service_healthy
+  tmpfs: *scratch
+
+services:
+  # The mock API every container below shares a network namespace with. Its network is internal,
+  # so the SDK reaches it at http://127.0.0.1:4010 and nothing else.
+  mock:
+    <<: *hardening
+    build:
+      context: ${CONFORMANCE_CONTEXT:-https://github.com/Hushscript/hushscript-sdk-conformance.git#v0.1.0}
+      dockerfile: Dockerfile
+    image: hushscript-sdk-conformance-mock:pinned
+    mem_limit: 512m
+    pids_limit: 128
+    tmpfs:
+      - /tmp
+    networks:
+      - sdk
+
+  test:
+    <<: *sandboxed
+    environment:
+      GOPROXY: "off"
+    command:
+      - sh
+      - -c
+      - >-
+        timeout 1800 go test -race -shuffle=on -count=1 -coverprofile=/tmp/cover.out -coverpkg=./... ./...
+        && scripts/coverage.sh /tmp/cover.out 85
+
+  # go-mutesting on the HTTP core (nightly). It rewrites sources in place, so it works on a copy.
+  mutation:
+    <<: *sandboxed
+    environment:
+      GOPROXY: "off"
+    command: ["timeout", "1800", "scripts/mutation.sh", "75"]
+
+  # Native fuzz targets, one at a time (nightly).
+  fuzz:
+    <<: *sandboxed
+    environment:
+      GOPROXY: "off"
+      FUZZ_TIME: ${FUZZ_TIME:-60s}
+    command: ["timeout", "3000", "scripts/fuzz.sh"]
+
+  lint:
+    <<: *sandboxed
+    environment:
+      GOPROXY: "off"
+    command:
+      - sh
+      - -c
+      - >-
+        go build ./...
+        && test -z "$(go tool gofumpt -l $(find . -name '*.go' -not -path './generated/*'))"
+        && timeout 900 golangci-lint run ./...
+
+  conformance:
+    <<: *sandboxed
+    environment:
+      GOPROXY: "off"
+      HUSHSCRIPT_CONFORMANCE: "1"
+    command: ["timeout", "1800", "go", "test", "-race", "-count=1", "-v", "./conformance/..."]
+
+  examples:
+    <<: *sandboxed
+    environment:
+      GOPROXY: "off"
+    command:
+      - sh
+      - -c
+      - >-
+        found=0;
+        for d in examples/*/; do
+        [ -d "$$d" ] || continue; found=1;
+        timeout 600 go run "./$$d" || exit 1;
+        done;
+        [ "$$found" = 1 ] || echo "no examples yet"
+
+  # Outbound network: the dependency checks that ask a registry or the vulnerability database.
+  audit:
+    <<: *dev
+    tmpfs: *scratch
+    environment:
+      GOMODCACHE: /tmp/gomod
+      GOFLAGS: -mod=readonly
+    command:
+      - sh
+      - -c
+      - >-
+        timeout 600 go mod tidy -diff
+        && timeout 600 go tool govulncheck ./...
+
+  # Outbound network: fetches the spec and hints.json, writes openapi.json and generated/.
+  regen:
+    <<: *dev
+    user: "${HOST_UID:-10001}:${HOST_GID:-10001}"
+    tmpfs: *scratch
+    environment:
+      GOPROXY: "off"
+    volumes:
+      - ./openapi.json:/work/openapi.json
+      - ./generated:/work/generated
+    command: ["timeout", "600", "go", "run", "./scripts"]
+
+  # Outbound network: the one test that talks to production. Nightly only.
+  smoke:
+    <<: *dev
+    tmpfs: *scratch
+    environment:
+      GOPROXY: "off"
+      HUSHSCRIPT_BASE_URL: https://api.hushscript.com
+      HUSHSCRIPT_TOKEN: ${SMOKE_TOKEN:-}
+    command: ["timeout", "300", "go", "run", "./smoke"]
+
+networks:
+  sdk:
+    internal: true

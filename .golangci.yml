@@ -1,0 +1,79 @@
+version: "2"
+
+run:
+  timeout: 10m
+  tests: true
+  go: "1.25"
+
+linters:
+  default: none
+  enable:
+    # spec 13.2 list
+    - staticcheck
+    - gosec
+    - errcheck
+    - errorlint
+    - bodyclose
+    - noctx
+    - contextcheck
+    - nilerr
+    - exhaustive
+    - gocritic
+    - revive
+    - unparam
+    - usestdlibvars
+    - forcetypeassert
+    # go vet with every analyzer
+    - govet
+    # the rest of golangci-lint's standard set
+    - ineffassign
+    - unused
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        # The brief fixes the field order of Error, and the struct layouts here are for readers, not for padding.
+        - fieldalignment
+    staticcheck:
+      checks: ["all"]
+    exhaustive:
+      default-signifies-exhaustive: false
+    gocritic:
+      enabled-tags: [diagnostic, style, performance, experimental, opinionated]
+      disabled-checks:
+        # Cosmetic: hugeParam would push the options and the config through pointers for no gain.
+        - hugeParam
+    revive:
+      enable-all-rules: false
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+  exclusions:
+    generated: strict
+    paths:
+      - generated
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
