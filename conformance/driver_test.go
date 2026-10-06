@@ -3,6 +3,7 @@ package conformance
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -73,6 +74,11 @@ func (d *driver) waitQuiet(ctx context.Context, done <-chan struct{}) (bool, err
 	}
 }
 
+// mockSeconds converts mock seconds to a Duration, rounding to the nearest nanosecond.
+func mockSeconds(seconds float64) time.Duration {
+	return time.Duration(math.Round(seconds * float64(mockSecondsFn)))
+}
+
 var errStalled = errors.New("SDK stalled: nothing is in flight, held or scheduled, and the call is still pending")
 
 // run drives the clocks until done closes.
@@ -90,7 +96,7 @@ func (d *driver) run(ctx context.Context, done <-chan struct{}) error {
 		}
 		target, found := d.clock.earliest()
 		if state.NextHoldAt != nil {
-			hold := time.Duration(*state.NextHoldAt * float64(mockSecondsFn))
+			hold := mockSeconds(*state.NextHoldAt)
 			if !found || hold < target {
 				target, found = hold, true
 			}
@@ -106,10 +112,13 @@ func (d *driver) run(ctx context.Context, done <-chan struct{}) error {
 		}
 		idleSince = time.Time{}
 		if advance := target - d.clock.current(); advance > 0 {
-			if err := d.mock.advance(ctx, advance); err != nil {
+			now, err := d.mock.advance(ctx, advance)
+			if err != nil {
 				return err
 			}
-			d.clock.setNow(target)
+			// The mock's own clock is the truth: the SDK's clock follows it to the nanosecond, so a
+			// float step can never leave a timer or a hold one tick short.
+			d.clock.setNow(max(target, mockSeconds(now)))
 			// Deliver the held responses due now before any SDK timer due at the same instant.
 			if quiet, err := d.waitQuiet(ctx, done); err != nil || !quiet {
 				return err

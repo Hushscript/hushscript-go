@@ -11,11 +11,16 @@ const (
 )
 
 // flacDuration reads total samples and the sample rate from STREAMINFO, the first metadata block.
-// STREAMINFO survives a cut of the file, so it is checked against the file's own size: the audio
+// A leading ID3v2 tag is skipped, as the server's FLAC path does. STREAMINFO survives a cut of the file, so it is checked against the file's own size: the audio
 // frames cannot take fewer bytes than the smallest frame STREAMINFO declares, times the least
 // number of frames the samples need.
 func flacDuration(s source) (float64, error) {
-	head, err := s.read(0, 8)
+	tag, err := s.read(0, int(min(s.size, 10)))
+	if err != nil {
+		return 0, err
+	}
+	base := int64(id3v2End(tag))
+	head, err := s.read(base, 8)
 	if err != nil {
 		return 0, err
 	}
@@ -23,7 +28,7 @@ func flacDuration(s source) (float64, error) {
 	if !bytes.HasPrefix(head, []byte("fLaC")) || head[4]&0x7F != 0 || blockLen < flacStreamInfoLen {
 		return 0, unreadable("STREAMINFO is not the first FLAC block")
 	}
-	info, err := s.read(8, flacStreamInfoLen)
+	info, err := s.read(base+8, flacStreamInfoLen)
 	if err != nil {
 		return 0, err
 	}
@@ -36,7 +41,7 @@ func flacDuration(s source) (float64, error) {
 	}
 	if maxBlock >= flacMinBlockSize && minFrame > 0 {
 		frames := (total + maxBlock - 1) / maxBlock
-		audioBytes := s.size - 8 - blockLen
+		audioBytes := s.size - base - 8 - blockLen
 		if audioBytes < 0 || uint64(audioBytes) < (frames-1)*minFrame {
 			return 0, unreadable("the file is truncated: it holds less audio than STREAMINFO declares")
 		}

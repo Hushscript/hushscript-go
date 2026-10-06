@@ -1,0 +1,569 @@
+package hushscript
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/url"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/Hushscript/hushscript-go/generated"
+)
+
+const (
+	// proxiedPartBytes is the API's upper bound for a part sent through it (spec 8.4).
+	proxiedPartBytes = 32 << 20
+	// urlMaxAge: presigned URLs live 24 h, so a page older than this is fetched again.
+	urlMaxAge = 23 * time.Hour
+	// bodyReleaseWait bounds how long a part buffer waits for the transport to let go of it.
+	bodyReleaseWait = time.Second
+)
+
+// uploadPlan is the direct-to-R2 plan of a create response; nil stands for a proxied job.
+type uploadPlan struct {
+	partSize   int64
+	totalParts int
+	urls       []generated.PresignedPartUrl
+	next       int // 0 once every part has a URL
+}
+
+func planOf(created *generated.UploadCreateResponse) *uploadPlan {
+	if created.Upload == nil {
+		return nil
+	}
+	plan := &uploadPlan{
+		partSize:   int64(created.Upload.PartSizeBytes),
+		totalParts: created.Upload.TotalParts,
+		urls:       created.Upload.PartUrls,
+	}
+	if created.Upload.NextPartNumber != nil {
+		plan.next = *created.Upload.NextPartNumber
+	}
+	return plan
+}
+
+type completedPart struct {
+	N    int    `json:"n"`
+	Etag string `json:"etag"`
+}
+
+// upload sends every part, keeps the job alive meanwhile and completes it. It returns the job state
+// the complete call reported, which is authoritative (spec 8.5).
+func (r *run) upload(parent context.Context, plan *uploadPlan) (string, error) {
+	c := r.core
+	ctx, cancel := context.WithCancel(parent)
+	beat := c.startHeartbeat(ctx, cancel, r.state.JobID)
+	state, err := r.sendAndComplete(ctx, plan)
+	cancel()
+	if failure := beat.stop(); failure != nil {
+		// A refused token ended the upload; whatever the cancellation then broke is a symptom.
+		return "", failure
+	}
+	return state, err
+}
+
+func (r *run) sendAndComplete(ctx context.Context, plan *uploadPlan) (string, error) {
+	c := r.core
+	up, err := c.newUploader(r, plan)
+	if err != nil {
+		return "", err
+	}
+	acks, err := up.send(ctx)
+	if err != nil {
+		return "", err
+	}
+	var body io.Reader
+	var editors []generated.RequestEditorFn
+	if acks != nil {
+		encoded, marshalErr := json.Marshal(struct {
+			Parts []completedPart `json:"parts"`
+		}{acks})
+		if marshalErr != nil {
+			return "", newSDKError(KindUpload, "upload_failed", "The complete request could not be built.", marshalErr, c.cfg.redactor(), hintInputs{})
+		}
+		body = bytes.NewReader(encoded)
+	} else {
+		// A proxied job completes with no body at all, so there is no content type either.
+		editors = append(editors, func(_ context.Context, req *http.Request) error {
+			req.Header.Del("Content-Type")
+			return nil
+		})
+	}
+	response, err := c.api.CompleteUploadWithBodyWithResponse(ctx, r.state.JobID, "application/json", body, editors...)
+	if err != nil {
+		return "", err
+	}
+	if response.JSON200 == nil {
+		return "", c.badResponse("POST /v1/uploads/{job}/complete")
+	}
+	return response.JSON200.State, nil
+}
+
+// uploader sends the parts of one job with at most `workers` in flight.
+type uploader struct {
+	core     *core
+	red      redactor
+	job      string
+	src      *fileSource
+	partSize int64
+	total    int
+	workers  int
+	report   func(int64)
+
+	pages    *partPages // nil for a proxied job
+	proxied  atomic.Bool
+	directOK atomic.Bool
+	nextPart atomic.Int64
+
+	mu    sync.Mutex
+	etags map[int]string
+}
+
+func (c *core) newUploader(r *run, plan *uploadPlan) (*uploader, error) {
+	red := c.cfg.redactor()
+	partSize := int64(proxiedPartBytes)
+	if plan != nil {
+		partSize = plan.partSize
+	}
+	if partSize < 1 {
+		return nil, newSDKError(KindUpload, "bad_part_plan", "The API returned an unusable part size.", nil, red, hintInputs{})
+	}
+	total := int((r.src.size + partSize - 1) / partSize)
+	if plan != nil && plan.totalParts != total {
+		return nil, newSDKError(KindUpload, "bad_part_plan",
+			"The API planned "+strconv.Itoa(plan.totalParts)+" parts; the file needs "+strconv.Itoa(total)+".", nil, red, hintInputs{})
+	}
+	u := &uploader{
+		core: c, red: red, job: r.state.JobID, src: r.src, partSize: partSize, total: total,
+		workers: min(r.concurrency, total), etags: map[int]string{},
+	}
+	if plan != nil {
+		u.pages = newPartPages(c, u.job, plan)
+	} else {
+		u.proxied.Store(true)
+	}
+	var sentMu sync.Mutex
+	var sent int64
+	u.report = func(n int64) {
+		sentMu.Lock()
+		defer sentMu.Unlock()
+		sent += n
+		if r.onProgress != nil {
+			r.onProgress(Progress{Stage: StageUploading, Percent: int(sent * 100 / r.src.size), BytesSent: sent, BytesTotal: r.src.size})
+		}
+	}
+	return u, nil
+}
+
+// send uploads every part and returns the ETags to complete with, or nil when the job went through the
+// API, whose complete call takes no body. Memory is bounded by workers times the part size: each
+// worker holds one buffer and reuses it for every part it sends.
+func (u *uploader) send(parent context.Context) ([]completedPart, error) {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	var wg sync.WaitGroup
+	var once sync.Once
+	var first error
+	for range u.workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := u.worker(ctx); err != nil {
+				once.Do(func() {
+					first = err
+					cancel()
+				})
+			}
+		}()
+	}
+	wg.Wait()
+	if first != nil {
+		return nil, first
+	}
+	if err := parent.Err(); err != nil {
+		return nil, u.core.abortError(err)
+	}
+	if err := u.src.checkNoMoreBytes(u.red); err != nil {
+		return nil, err
+	}
+	if u.proxied.Load() {
+		return nil, nil
+	}
+	acks := make([]completedPart, 0, len(u.etags))
+	for n, etag := range u.etags {
+		acks = append(acks, completedPart{N: n, Etag: etag})
+	}
+	slices.SortFunc(acks, func(a, b completedPart) int { return a.N - b.N })
+	return acks, nil
+}
+
+func (u *uploader) worker(ctx context.Context) error {
+	var buf []byte
+	for {
+		if err := ctx.Err(); err != nil {
+			return u.core.abortError(err)
+		}
+		n := int(u.nextPart.Add(1))
+		if n > u.total {
+			return nil
+		}
+		offset := int64(n-1) * u.partSize
+		length := min(u.partSize, u.src.size-offset)
+		if buf == nil {
+			buf = make([]byte, min(u.partSize, u.src.size))
+		}
+		data := buf[:length]
+		if err := u.src.readPart(data, offset, u.red); err != nil {
+			return err
+		}
+		hold := &bodyHold{}
+		err := u.sendPart(ctx, n, data, hold)
+		if !hold.released() {
+			buf = nil // the transport still holds it: never write into it again
+		}
+		if err != nil {
+			return err
+		}
+		u.report(length)
+	}
+}
+
+// bodyHold tracks the request bodies made from one part buffer, so the buffer is rewritten only after
+// the transport has closed every one of them (a transport may still be reading after it answered).
+type bodyHold struct {
+	open sync.WaitGroup
+}
+
+func (h *bodyHold) released() bool {
+	done := make(chan struct{})
+	go func() {
+		h.open.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(bodyReleaseWait):
+		return false
+	}
+}
+
+type heldBody struct {
+	*bytes.Reader
+	once sync.Once
+	hold *bodyHold
+}
+
+func (b *heldBody) Close() error {
+	b.once.Do(b.hold.open.Done)
+	return nil
+}
+
+// partRequest is a PUT of data with its exact Content-Length, replayable for a retry without copying
+// the bytes.
+func partRequest(ctx context.Context, target string, data []byte, hold *bodyHold) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, target, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.ContentLength = int64(len(data))
+	req.GetBody = func() (io.ReadCloser, error) {
+		hold.open.Add(1)
+		return &heldBody{Reader: bytes.NewReader(data), hold: hold}, nil
+	}
+	req.Body = http.NoBody
+	return req, nil
+}
+
+// sendPart sends one part: direct first, with the fallback rules of spec 8.4, then through the API
+// when the job went proxied.
+func (u *uploader) sendPart(ctx context.Context, n int, data []byte, hold *bodyHold) error {
+	if !u.proxied.Load() {
+		if err := u.sendDirect(ctx, n, data, hold); err != nil {
+			return err
+		}
+	}
+	if u.proxied.Load() {
+		u.mu.Lock()
+		delete(u.etags, n)
+		u.mu.Unlock()
+		return u.putProxied(ctx, n, data, hold)
+	}
+	return nil
+}
+
+type directState struct{ refetched bool }
+
+func (u *uploader) sendDirect(ctx context.Context, n int, data []byte, hold *bodyHold) error {
+	state := &directState{}
+	for !u.proxied.Load() && u.pages != nil {
+		target, direct, err := u.pages.urlFor(ctx, n)
+		if err != nil {
+			if recovered := u.recover(ctx, err, n, "", state); recovered != nil {
+				return recovered
+			}
+			continue
+		}
+		if !direct {
+			if u.directOK.Load() {
+				return u.partURLMissing(n)
+			}
+			u.proxied.Store(true)
+			return nil
+		}
+		etag, err := u.putDirect(ctx, n, target, data, hold)
+		if err == nil {
+			if u.proxied.Load() {
+				return nil
+			}
+			u.directOK.Store(true)
+			u.mu.Lock()
+			u.etags[n] = etag
+			u.mu.Unlock()
+			return nil
+		}
+		if recovered := u.recover(ctx, err, n, target, state); recovered != nil {
+			return recovered
+		}
+	}
+	return nil
+}
+
+func (u *uploader) partURLMissing(n int) *Error {
+	return newSDKError(KindUpload, "part_url_missing", "No upload URL for part "+strconv.Itoa(n)+".", nil, u.red, hintInputs{})
+}
+
+// isTerminal is a 4xx other than 429 (which was already retried): the API said no, and trying again
+// will not change it.
+func isTerminal(failure *Error) bool {
+	return failure.Status >= http.StatusBadRequest && failure.Status < http.StatusInternalServerError &&
+		failure.Status != http.StatusTooManyRequests
+}
+
+// recover decides what a failed direct attempt (the PUT, or the part-urls fetch behind it when
+// target is "") leads to. A 403, or any failure once a direct PUT has succeeded, gets one fresh URL
+// page; after that the job falls back to proxied parts if no direct PUT ever succeeded, and raises
+// parts_exhausted if one did. It returns nil when the part should be tried again.
+func (u *uploader) recover(ctx context.Context, err error, n int, target string, state *directState) error {
+	failure, ok := err.(*Error) //nolint:errorlint // the doer and the pipeline return their own errors unwrapped
+	if !ok || failure.Kind == KindAbort || (failure.Kind == KindUpload && failure.Code == "part_url_missing") || ctx.Err() != nil {
+		return err
+	}
+	// The part-urls fetch itself was refused for a reason a fresh page or proxied parts cannot fix.
+	if target == "" && u.directOK.Load() && isTerminal(failure) {
+		return err
+	}
+	cause := failure
+	if target != "" && !state.refetched && (failure.Status == http.StatusForbidden || u.directOK.Load()) {
+		state.refetched = true
+		refreshErr := u.pages.refresh(ctx, n, target)
+		if refreshErr == nil {
+			return nil
+		}
+		refresh, isError := refreshErr.(*Error) //nolint:errorlint // as above
+		if !isError || refresh.Kind == KindAbort || ctx.Err() != nil || (u.directOK.Load() && isTerminal(refresh)) {
+			return refreshErr
+		}
+		cause = refresh
+	}
+	if !u.directOK.Load() {
+		u.proxied.Store(true)
+		return nil
+	}
+	return newSDKError(KindUpload, "parts_exhausted", "Part "+strconv.Itoa(n)+" failed after retries and a fresh URL.", cause, u.red, hintInputs{})
+}
+
+func (u *uploader) putDirect(ctx context.Context, n int, target string, data []byte, hold *bodyHold) (string, error) {
+	req, err := partRequest(withDirectStorage(ctx, n), target, data, hold)
+	if err != nil {
+		return "", newSDKError(KindUpload, "bad_part_plan", "The API returned a part URL that cannot be used.", nil, u.red, hintInputs{})
+	}
+	resp, err := u.core.doer.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	etag := strings.Trim(resp.Header.Get("ETag"), `"`)
+	if etag == "" {
+		return "", newSDKError(KindUpload, "etag_missing", "Storage answered a part without an ETag.", nil, u.red, hintInputs{})
+	}
+	return etag, nil
+}
+
+func (u *uploader) putProxied(ctx context.Context, n int, data []byte, hold *bodyHold) error {
+	target := u.core.cfg.baseURL + "/v1/uploads/" + url.PathEscape(u.job) + "/parts/" + strconv.Itoa(n)
+	req, err := partRequest(withAttemptTimeout(ctx, partTimeout), target, data, hold)
+	if err != nil {
+		return newSDKError(KindUpload, "upload_failed", "The part request could not be built.", err, u.red, hintInputs{})
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := u.core.doer.Do(req)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+	return nil
+}
+
+// partPages holds the presigned part URLs, 16 to a page, fetched on demand and again when expired.
+type partPages struct {
+	core *core
+	job  string
+
+	mu       sync.Mutex
+	pages    []*urlPage
+	inflight map[int]*pageFetch
+	next     int // the first part number no page covers yet; 0 when every part has a URL
+	direct   bool
+}
+
+type urlPage struct {
+	start     int
+	urls      map[int]string
+	fetchedAt time.Time
+}
+
+type pageFetch struct {
+	done chan struct{}
+	err  error
+}
+
+func newPartPages(c *core, job string, plan *uploadPlan) *partPages {
+	p := &partPages{core: c, job: job, inflight: map[int]*pageFetch{}, next: plan.next, direct: true}
+	if len(plan.urls) > 0 {
+		p.store(plan.urls)
+	}
+	return p
+}
+
+// store records a page and returns its first part number. Call it without the lock held.
+func (p *partPages) store(urls []generated.PresignedPartUrl) int {
+	start := urls[0].N
+	page := &urlPage{urls: make(map[int]string, len(urls)), fetchedAt: p.core.cfg.clock.Now()}
+	for _, entry := range urls {
+		start = min(start, entry.N)
+		page.urls[entry.N] = entry.Url
+	}
+	page.start = start
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i, existing := range p.pages {
+		if existing.start == start {
+			p.pages[i] = page
+			return start
+		}
+	}
+	p.pages = append(p.pages, page)
+	return start
+}
+
+func (p *partPages) pageOf(n int) *urlPage {
+	for _, page := range p.pages {
+		if _, ok := page.urls[n]; ok {
+			return page
+		}
+	}
+	return nil
+}
+
+// fetchPage makes one request per page start, however many parts wait for it.
+func (p *partPages) fetchPage(ctx context.Context, start int) error {
+	p.mu.Lock()
+	if running, ok := p.inflight[start]; ok {
+		p.mu.Unlock()
+		select {
+		case <-running.done:
+			return running.err
+		case <-ctx.Done():
+			return p.core.abortError(ctx.Err())
+		}
+	}
+	fetch := &pageFetch{done: make(chan struct{})}
+	p.inflight[start] = fetch
+	p.mu.Unlock()
+
+	fetch.err = p.load(ctx, start)
+
+	p.mu.Lock()
+	delete(p.inflight, start)
+	p.mu.Unlock()
+	close(fetch.done)
+	return fetch.err
+}
+
+func (p *partPages) load(ctx context.Context, start int) error {
+	response, err := p.core.api.GetUploadPartUrlsWithResponse(ctx, p.job, &generated.GetUploadPartUrlsParams{Start: &start})
+	if err != nil {
+		return err
+	}
+	if response.JSON200 == nil {
+		return p.core.badResponse("GET /v1/uploads/{job}/part-urls")
+	}
+	if len(response.JSON200.PartUrls) == 0 {
+		p.mu.Lock()
+		p.direct = false
+		p.mu.Unlock()
+		return nil
+	}
+	stored := p.store(response.JSON200.PartUrls)
+	p.mu.Lock()
+	if p.next == stored {
+		p.next = 0
+		if response.JSON200.NextPartNumber != nil {
+			p.next = *response.JSON200.NextPartNumber
+		}
+	}
+	p.mu.Unlock()
+	return nil
+}
+
+// maxPageFetches bounds the fetches one part may wait for, so an API that never lists a part ends in
+// an error and not a loop.
+const maxPageFetches = 4
+
+// urlFor is the URL of part n; direct is false when the job turns out to take proxied parts only.
+func (p *partPages) urlFor(ctx context.Context, n int) (signedURL string, direct bool, err error) {
+	for range maxPageFetches {
+		p.mu.Lock()
+		hasDirect, page, next := p.direct, p.pageOf(n), p.next
+		p.mu.Unlock()
+		if !hasDirect {
+			return "", false, nil
+		}
+		var start int
+		switch {
+		case page == nil && next == 0:
+			return "", false, newSDKError(KindUpload, "part_url_missing", "No upload URL for part "+strconv.Itoa(n)+".", nil, p.core.cfg.redactor(), hintInputs{})
+		case page == nil:
+			start = next
+		case p.core.cfg.clock.Now().Sub(page.fetchedAt) > urlMaxAge:
+			start = page.start
+		default:
+			return page.urls[n], true, nil
+		}
+		if fetchErr := p.fetchPage(ctx, start); fetchErr != nil {
+			return "", false, fetchErr
+		}
+	}
+	return "", false, newSDKError(KindUpload, "part_url_missing", "No upload URL for part "+strconv.Itoa(n)+".", nil, p.core.cfg.redactor(), hintInputs{})
+}
+
+// refresh fetches again the page that holds stale, unless another part already did.
+func (p *partPages) refresh(ctx context.Context, n int, stale string) error {
+	p.mu.Lock()
+	page := p.pageOf(n)
+	if page == nil || page.urls[n] != stale {
+		p.mu.Unlock()
+		return nil
+	}
+	start := page.start
+	p.mu.Unlock()
+	return p.fetchPage(ctx, start)
+}

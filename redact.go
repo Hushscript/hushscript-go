@@ -16,6 +16,13 @@ const (
 // tokenPattern is spec section 10: the shape of a Hushscript token, wherever it turns up.
 var tokenPattern = regexp.MustCompile(`hsr\d+:[a-z]+:pat\.[0-9a-f]+\.[0-9a-f]+`)
 
+// urlQuery finds a URL with a query string. The query of a presigned storage URL is a signature, so
+// no text the SDK shows keeps one (spec section 10).
+var urlQuery = regexp.MustCompile(`(https?://[^\s"'<>?#]+)\?[^\s"'<>#]*`)
+
+// redactedQuery replaces a URL's query in text.
+const redactedQuery = "…[redacted]"
+
 // secret holds the token. Every way of printing it shows the redaction marker instead.
 type secret string
 
@@ -45,7 +52,8 @@ func (r redactor) apply(text string) string {
 			text = strings.ReplaceAll(text, tail, redactedToken)
 		}
 	}
-	return tokenPattern.ReplaceAllString(text, redactedToken)
+	text = tokenPattern.ReplaceAllString(text, redactedToken)
+	return urlQuery.ReplaceAllString(text, "${1}?"+redactedQuery)
 }
 
 // value redacts every string inside a decoded JSON value and returns a copy.

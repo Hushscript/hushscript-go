@@ -22,6 +22,7 @@ type ErrorKind int
 const (
 	KindAPI ErrorKind = iota
 	KindConfiguration
+	KindPreflight
 	KindUnsupportedMedia
 	KindFileLimit
 	KindDailyLimit
@@ -45,6 +46,7 @@ const (
 var kindNames = map[ErrorKind]string{
 	KindAPI:                   "ApiError",
 	KindConfiguration:         "ConfigurationError",
+	KindPreflight:             "PreflightError",
 	KindUnsupportedMedia:      "UnsupportedMediaError",
 	KindFileLimit:             "FileLimitError",
 	KindDailyLimit:            "DailyLimitError",
@@ -74,9 +76,10 @@ func (k ErrorKind) String() string {
 }
 
 // IsPreflight reports whether the kind belongs to the preflight family: errors raised before any
-// request that holds credit, so no hold was placed.
+// request that holds credit, so no hold was placed. KindPreflight itself is the family's base,
+// raised for an invalid option.
 func (k ErrorKind) IsPreflight() bool {
-	return k >= KindUnsupportedMedia && k <= KindResumeMismatch
+	return k >= KindPreflight && k <= KindResumeMismatch
 }
 
 // IsAPI reports whether the kind is an answer from the API: ApiError and its subclasses.
@@ -105,6 +108,20 @@ type Error struct {
 	Kind ErrorKind
 	// Message is the catalog meaning for API errors, a fixed text for the SDK's own.
 	Message string
+	// IdempotencyKey is the key of the upload create, set on every error Transcribe raises once the
+	// create was sent. Passing it back in TranscribeOptions replays the same job instead of placing
+	// a second hold.
+	IdempotencyKey string
+	// ResumeToken lets Resume pick the job up again. It is set once the job id is known, on a
+	// WaitTimeout error and on a cancellation, and on every other error of a Transcribe call.
+	ResumeToken string
+	// JobID is the id of the failed job, on a JobFailed error.
+	JobID string
+	// FailureKind is "media_unreadable" or "media_undecodable" when the file itself could not be
+	// read, on a JobFailed error; "" otherwise.
+	FailureKind string
+	// JobError is the job's own failure text, opaque, on a JobFailed error.
+	JobError string
 
 	cause error
 	// causeText is the cause in one redacted line for Error(), set for network failures only.

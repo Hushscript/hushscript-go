@@ -12,6 +12,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -50,7 +52,45 @@ const maxKeyPeekBytes = 1 << 20
 type (
 	retryClassKey     struct{}
 	attemptTimeoutKey struct{}
+	directStorageKey  struct{}
 )
+
+// partTimeout is the per-attempt timeout of an upload part, direct or proxied (spec section 3).
+const partTimeout = 300 * time.Second
+
+// withDirectStorage marks a request as a direct-to-storage part upload: its URL is a presigned one
+// that may share the API's origin, so the token must stay off it whatever its host says. It is
+// retried like any upload part, gets the 300 s part timeout, is logged as "r2:part/N" and its errors
+// never show the signature in the URL's query.
+func withDirectStorage(ctx context.Context, part int) context.Context {
+	ctx = withRetryClass(ctx, classUpload)
+	ctx = withAttemptTimeout(ctx, partTimeout)
+	ctx = withLogLabel(ctx, "r2:part/"+strconv.Itoa(part))
+	return context.WithValue(ctx, directStorageKey{}, true)
+}
+
+func isDirectStorage(ctx context.Context) bool {
+	direct, _ := ctx.Value(directStorageKey{}).(bool)
+	return direct
+}
+
+// withoutQuery is rawURL up to its query or fragment: a presigned URL's query is the signature.
+func withoutQuery(rawURL string) string {
+	if i := strings.IndexAny(rawURL, "?#"); i >= 0 {
+		return rawURL[:i]
+	}
+	return rawURL
+}
+
+// scrubSignedURLs cuts the query off every *url.Error in the chain, in place: the error came out of
+// our own http.Client call, so nobody else holds it, and errors.As then hands out a clean one.
+func scrubSignedURLs(err error) {
+	for ; err != nil; err = errors.Unwrap(err) {
+		if urlErr, ok := err.(*url.Error); ok { //nolint:errorlint // walking the chain by hand is the point
+			urlErr.URL = withoutQuery(urlErr.URL)
+		}
+	}
+}
 
 // withRetryClass makes the doer treat the request as the given class, whatever its method and path say.
 // Direct-to-storage part uploads use it: their URL is not an API path.
@@ -212,8 +252,10 @@ func (d *doer) attempt(parent context.Context, req *http.Request) outcome {
 		}
 		r.Body = body
 	}
-	// The token goes to the API host only; direct-to-storage part uploads carry their own signature.
-	if strings.EqualFold(r.URL.Host, d.cfg.baseHost) && r.URL.Scheme == d.cfg.baseScheme {
+	// The token goes to the API host only; direct-to-storage part uploads carry their own signature,
+	// and never the token, even when the storage URL happens to share the API's origin.
+	direct := isDirectStorage(parent)
+	if !direct && strings.EqualFold(r.URL.Host, d.cfg.baseHost) && r.URL.Scheme == d.cfg.baseScheme {
 		r.Header.Set("Authorization", "Bearer "+d.cfg.token.reveal())
 	} else {
 		r.Header.Del("Authorization")
@@ -222,6 +264,9 @@ func (d *doer) attempt(parent context.Context, req *http.Request) outcome {
 
 	resp, err := d.cfg.httpClient.Do(r)
 	if err != nil {
+		if direct {
+			scrubSignedURLs(err)
+		}
 		unsent := handshakeFailed.Load() || (asked.Load() && !connected.Load()) || connectionSetupFailure(err)
 		return outcome{err: err, sent: !unsent, took: time.Since(started)}
 	}

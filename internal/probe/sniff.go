@@ -64,6 +64,10 @@ func Sniff(head []byte) Format {
 	case len(head) >= 8 && bytes.Equal(head[4:8], []byte("ftyp")):
 		return FormatISOBMFF
 	case bytes.HasPrefix(head, []byte("ID3")):
+		// A FLAC stream may sit behind an ID3v2 tag, as the server's FLAC path accepts.
+		if end := id3v2End(head); end > 0 && end <= len(head) && bytes.HasPrefix(head[end:], []byte("fLaC")) {
+			return FormatFLAC
+		}
 		return FormatMP3
 	case len(head) >= 2 && isLayer3Sync(head[0], head[1]):
 		return FormatMP3
@@ -130,4 +134,41 @@ func (s source) read(off int64, n int) ([]byte, error) {
 
 func isLayer3Sync(a, b byte) bool {
 	return a == 0xFF && b&0xE0 == 0xE0 && b&0x06 == 0x02
+}
+
+// sniffBytes is how much of the start of a file SniffAt looks at.
+const sniffBytes = 64
+
+// SniffAt is Sniff on the start of the size bytes behind r. It reads past an ID3v2 tag to tell a
+// tagged FLAC from an MP3, which a short head cannot. A short or failing reader gives FormatUnknown.
+func SniffAt(r io.ReaderAt, size int64) Format {
+	if r == nil || size <= 0 {
+		return FormatUnknown
+	}
+	head := make([]byte, min(size, sniffBytes))
+	got, _ := r.ReadAt(head, 0)
+	head = head[:got]
+	format := Sniff(head)
+	if format != FormatMP3 {
+		return format
+	}
+	if end := id3v2End(head); end > 0 && int64(end)+4 <= size {
+		if tail, err := (source{r: r, size: size}).read(int64(end), 4); err == nil && bytes.Equal(tail, []byte("fLaC")) {
+			return FormatFLAC
+		}
+	}
+	return format
+}
+
+// id3v2End is the offset just past an ID3v2 tag at the start of head, or 0 without one, or with a
+// size that is not syncsafe. It follows id3v2_end in backend/src/audio_probe.rs.
+func id3v2End(head []byte) int {
+	if len(head) < 10 || !bytes.HasPrefix(head, []byte("ID3")) || (head[6]|head[7]|head[8]|head[9])&0x80 != 0 {
+		return 0
+	}
+	end := 10 + int(head[6])<<21 + int(head[7])<<14 + int(head[8])<<7 + int(head[9])
+	if head[5]&0x10 != 0 {
+		end += 10
+	}
+	return end
 }

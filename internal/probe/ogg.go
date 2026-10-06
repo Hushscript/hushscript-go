@@ -93,9 +93,9 @@ func oggDuration(s source) (float64, error) {
 		}
 		// The decoded audio is (granule - pre-skip) / 48000 long. The container reports the whole
 		// granule position, and that is what ffprobe and the conformance fixtures count, so the
-		// pre-skip is added back: erring high keeps ceil(probe) at or above that figure.
-		decoded := float64(granule-uint64(first.preSkip)) / oggOpusRate
-		return decoded + float64(first.preSkip)/oggOpusRate, nil
+		// pre-skip is not subtracted: erring high keeps ceil(probe) at or above that figure. It
+		// is read only to validate the granule.
+		return float64(granule) / oggOpusRate, nil
 	}
 	return float64(granule) / float64(first.rate), nil
 }
@@ -134,8 +134,9 @@ func oggFirstPage(s source) (oggStream, error) {
 }
 
 // oggLastGranule walks the pages of the tail window and returns the last granule position of the
-// stream with the given serial. A page only counts when its checksum holds, so an "OggS" inside a
-// packet is skipped.
+// stream with the given serial. The first page of the window that parses with a good checksum
+// starts the walk (an "OggS" inside a packet, or the cut start of the window, is skipped); from
+// there every page must parse and fit, or the file is refused.
 func oggLastGranule(s source, serial uint32) (uint64, error) {
 	tailLen := min(s.size, oggTailSize)
 	start := s.size - tailLen
@@ -144,30 +145,39 @@ func oggLastGranule(s source, serial uint32) (uint64, error) {
 		return 0, err
 	}
 	var granule uint64
-	found := false
+	found, synced := false, false
 	failures := 0
 	for pos := 0; pos < len(tail); {
-		next := bytes.Index(tail[pos:], []byte("OggS"))
-		if next < 0 {
-			break
+		if !synced {
+			next := bytes.Index(tail[pos:], []byte("OggS"))
+			if next < 0 {
+				break
+			}
+			pos += next
 		}
-		pos += next
 		page, ok := oggPageAt(tail[pos:])
-		if ok && pos+page.length <= len(tail) && binary.LittleEndian.Uint32(tail[pos+22:pos+26]) == oggCRC(tail[pos:pos+page.length]) {
-			if page.flags&oggFlagBOS != 0 && (start+int64(pos) > 0) {
-				return 0, unreadable("the Ogg file holds more than one stream")
+		if !ok || pos+page.length > len(tail) || binary.LittleEndian.Uint32(tail[pos+22:pos+26]) != oggCRC(tail[pos:pos+page.length]) {
+			if synced {
+				// Past the first good page the pages follow one another to the end of the file. A page
+				// that does not parse is a damaged or cut last page, and an earlier granule would
+				// undercount the file.
+				return 0, unreadable("the last Ogg page is damaged")
 			}
-			if page.serial == serial && page.granule != ^uint64(0) {
-				granule, found = page.granule, true
+			failures++
+			if failures > oggMaxCRCFailures {
+				return 0, unreadable("the end of the Ogg file is damaged")
 			}
-			pos += page.length
+			pos++
 			continue
 		}
-		failures++
-		if failures > oggMaxCRCFailures {
-			return 0, unreadable("the end of the Ogg file is damaged")
+		synced = true
+		if page.flags&oggFlagBOS != 0 && (start+int64(pos) > 0) {
+			return 0, unreadable("the Ogg file holds more than one stream")
 		}
-		pos++
+		if page.serial == serial && page.granule != ^uint64(0) {
+			granule, found = page.granule, true
+		}
+		pos += page.length
 	}
 	if !found {
 		return 0, unreadable("no Ogg page with a position at the end of the file")
