@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"io"
+	"net/http"
 	"runtime"
 	"strings"
 	"sync"
@@ -258,5 +259,88 @@ func TestADirectSuccessThatLosesTheSwapToAFallbackIsSentThroughTheAPIAgain(t *te
 	}
 	if body := api.requests("complete")[0].body; len(body) != 0 {
 		t.Errorf("a proxied job completed with a body: %s", body)
+	}
+}
+
+// lateCloseTransport forwards requests to the default transport but closes each direct part's body
+// only after release (the RoundTripper contract allows a transport to keep reading after it answered).
+type lateCloseTransport struct {
+	delay  time.Duration
+	after  func() // called when a direct part has been answered
+	mu     sync.Mutex
+	starts []time.Time
+	closes []time.Time
+}
+
+type lateBody struct {
+	io.ReadCloser
+	owner *lateCloseTransport
+}
+
+func (b lateBody) Close() error {
+	b.owner.mu.Lock()
+	b.owner.closes = append(b.owner.closes, time.Now())
+	b.owner.mu.Unlock()
+	return b.ReadCloser.Close()
+}
+
+func (l *lateCloseTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if !strings.HasPrefix(req.URL.Path, "/r2/") {
+		return http.DefaultTransport.RoundTrip(req)
+	}
+	l.mu.Lock()
+	l.starts = append(l.starts, time.Now())
+	l.mu.Unlock()
+	original := req.Body
+	forward := req.Clone(req.Context())
+	forward.Body = io.NopCloser(original)
+	resp, err := http.DefaultTransport.RoundTrip(forward)
+	time.AfterFunc(l.delay, func() { _ = lateBody{ReadCloser: original, owner: l}.Close() })
+	if err == nil && l.after != nil {
+		l.after()
+	}
+	return resp, err
+}
+
+func TestAPartBufferWaitsForALateClosingTransportBeyondOneSecond(t *testing.T) {
+	clock := newVirtualClock()
+	api := newFakeAPI(t, clock)
+	api.partSize = 330_000 // two parts
+	clock.run(t, api)
+	late := &lateCloseTransport{delay: 1300 * time.Millisecond}
+	client := pipelineClient(t, api, clock, WithHTTPClient(&http.Client{Transport: late}))
+	wav := testWAV(20)
+	if _, err := client.TranscribeReader(context.Background(), bytes.NewReader(wav), int64(len(wav)), &TranscribeOptions{Concurrency: 1}); err != nil {
+		t.Fatalf("transcribe: %v", err)
+	}
+	late.mu.Lock()
+	defer late.mu.Unlock()
+	if len(late.starts) != 2 || len(late.closes) != 2 {
+		t.Fatalf("part requests = %d, bodies closed = %d, want 2 and 2", len(late.starts), len(late.closes))
+	}
+	for i := 1; i < len(late.starts); i++ {
+		if late.starts[i].Before(late.closes[i-1]) {
+			t.Errorf("part %d started %v before the body of part %d was closed: its buffer was rewritten under the transport", i+1, late.closes[i-1].Sub(late.starts[i]), i)
+		}
+	}
+}
+
+func TestACancelDuringALateBodyCloseReturnsAtOnce(t *testing.T) {
+	clock := newVirtualClock()
+	api := newFakeAPI(t, clock)
+	api.partSize = testPartSize
+	clock.run(t, api)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var cancelledAt time.Time
+	var once sync.Once
+	late := &lateCloseTransport{delay: 3 * time.Second, after: func() { once.Do(func() { cancelledAt = time.Now(); cancel() }) }}
+	client := pipelineClient(t, api, clock, WithHTTPClient(&http.Client{Transport: late}))
+	wav := testWAV(20)
+	_, err := client.TranscribeReader(ctx, bytes.NewReader(wav), int64(len(wav)), &TranscribeOptions{Concurrency: 1})
+	returned := time.Now()
+	_ = wantCode(t, err, KindAbort, "aborted")
+	if took := returned.Sub(cancelledAt); took > 400*time.Millisecond {
+		t.Errorf("Transcribe returned %v after the cancel, waiting for a transport that closes late", took)
 	}
 }

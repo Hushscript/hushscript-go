@@ -22,8 +22,6 @@ const (
 	proxiedPartBytes = 32 << 20
 	// urlMaxAge: presigned URLs live 24 h, so a page older than this is fetched again.
 	urlMaxAge = 23 * time.Hour
-	// bodyReleaseWait bounds how long a part buffer waits for the transport to let go of it.
-	bodyReleaseWait = time.Second
 )
 
 // uploadPlan is the direct-to-R2 plan of a create response; nil stands for a proxied job.
@@ -233,12 +231,11 @@ func (u *uploader) worker(ctx context.Context) error {
 			return err
 		}
 		hold := &bodyHold{}
-		err := u.sendPart(ctx, n, data, hold)
-		if !hold.released() {
-			buf = nil // the transport still holds it: never write into it again
-		}
-		if err != nil {
+		if err := u.sendPart(ctx, n, data, hold); err != nil {
 			return err
+		}
+		if !hold.wait(ctx) {
+			buf = nil // cancelled while the transport still holds it: never write into it again
 		}
 		u.report(length)
 	}
@@ -247,20 +244,46 @@ func (u *uploader) worker(ctx context.Context) error {
 // bodyHold tracks the request bodies made from one part buffer, so the buffer is rewritten only after
 // the transport has closed every one of them (a transport may still be reading after it answered).
 type bodyHold struct {
-	open sync.WaitGroup
+	mu      sync.Mutex
+	open    int
+	changed chan struct{} // closed on the next release; nil while nobody waits
 }
 
-func (h *bodyHold) released() bool {
-	done := make(chan struct{})
-	go func() {
-		h.open.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return true
-	case <-time.After(bodyReleaseWait):
-		return false
+func (h *bodyHold) acquire() {
+	h.mu.Lock()
+	h.open++
+	h.mu.Unlock()
+}
+
+func (h *bodyHold) release() {
+	h.mu.Lock()
+	h.open--
+	if h.changed != nil {
+		close(h.changed)
+		h.changed = nil
+	}
+	h.mu.Unlock()
+}
+
+// wait blocks until every body has been closed, however long the transport takes, and reports true.
+// It reports false only when ctx ends first.
+func (h *bodyHold) wait(ctx context.Context) bool {
+	for {
+		h.mu.Lock()
+		if h.open == 0 {
+			h.mu.Unlock()
+			return true
+		}
+		if h.changed == nil {
+			h.changed = make(chan struct{})
+		}
+		changed := h.changed
+		h.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return false
+		}
 	}
 }
 
@@ -271,7 +294,7 @@ type heldBody struct {
 }
 
 func (b *heldBody) Close() error {
-	b.once.Do(b.hold.open.Done)
+	b.once.Do(b.hold.release)
 	return nil
 }
 
@@ -284,7 +307,7 @@ func partRequest(ctx context.Context, target string, data []byte, hold *bodyHold
 	}
 	req.ContentLength = int64(len(data))
 	req.GetBody = func() (io.ReadCloser, error) {
-		hold.open.Add(1)
+		hold.acquire()
 		return &heldBody{Reader: bytes.NewReader(data), hold: hold}, nil
 	}
 	req.Body = http.NoBody
