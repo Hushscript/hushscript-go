@@ -17,7 +17,9 @@ const (
 	defaultMaxRetries = 3
 	tokenPrefix       = "hsr"
 
-	missingTokenMessage = "Set HUSHSCRIPT_TOKEN or pass a token. Create one in the Hushscript app: " +
+	missingTokenMessage = "No Hushscript token: set HUSHSCRIPT_TOKEN or pass a token."
+	// missingTokenHint is the one configuration hint (spec section 3); other configuration errors have none.
+	missingTokenHint = "Set HUSHSCRIPT_TOKEN or pass a token. Create one in the Hushscript app: " +
 		"Account → Connected apps (app.hushscript.com/account/mcp)."
 )
 
@@ -134,7 +136,8 @@ func WithClock(clock Clock) Option {
 
 // WithHTTPClient replaces the http.Client the SDK sends requests with, for a proxy, custom TLS roots
 // or a counting transport. The SDK sets no Client.Timeout of its own on it (timeouts go through
-// contexts), and does not stop it following redirects.
+// contexts). It sends through a shallow copy that never follows redirects, so the caller's client is
+// left as it was and a 3xx answer is an error, whatever CheckRedirect the caller set.
 func WithHTTPClient(client *http.Client) Option {
 	return func(c *config) error {
 		if client == nil {
@@ -146,7 +149,7 @@ func WithHTTPClient(client *http.Client) Option {
 }
 
 func newConfigError(message string) *Error {
-	return newSDKError(KindConfiguration, "config_invalid", message, nil, redactor{})
+	return newSDKError(KindConfiguration, "config_invalid", message, nil, redactor{}, hintInputs{})
 }
 
 // setBase stores a validated base URL and the parts of it that decide where the token may go.
@@ -205,7 +208,9 @@ func resolve(opts []Option) (config, error) {
 		c.token = secret(os.Getenv("HUSHSCRIPT_TOKEN"))
 	}
 	if c.token == "" {
-		return config{}, newSDKError(KindConfiguration, "config_invalid", missingTokenMessage, nil, redactor{})
+		failure := newConfigError(missingTokenMessage)
+		failure.Hint = missingTokenHint
+		return config{}, failure
 	}
 	if !validToken(c.token.reveal()) {
 		return config{}, newConfigError("The token contains characters a Hushscript token never has (printable ASCII only).")
@@ -236,12 +241,15 @@ func resolve(opts []Option) (config, error) {
 	if c.jitter == nil {
 		c.jitter = fullJitter
 	}
-	if c.httpClient == nil {
-		c.httpClient = &http.Client{
-			// The token must not follow a redirect anywhere, and the API never redirects.
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		}
+	// The token must not follow a redirect anywhere, and the API never redirects: a 3xx comes back
+	// as the answer, and the doer turns it into an error.
+	noRedirects := &http.Client{}
+	if c.httpClient != nil {
+		copied := *c.httpClient
+		noRedirects = &copied
 	}
+	noRedirects.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	c.httpClient = noRedirects
 	if err := resolveLogger(&c); err != nil {
 		return config{}, err
 	}

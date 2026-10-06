@@ -27,8 +27,8 @@ func TestClassifiesOperationsByTheRetryTable(t *testing.T) {
 		{"GET", "/v1/uploads/j1/part-urls", classSafe},
 		{"HEAD", "/v1/account", classSafe},
 		{"POST", "/v1/uploads/j1/heartbeat", classSafe},
-		{"POST", "/v1/uploads/j1/complete", classSafe},
-		{"PUT", "/v1/uploads/j1/parts/4", classSafe},
+		{"POST", "/v1/uploads/j1/complete", classUpload},
+		{"PUT", "/v1/uploads/j1/parts/4", classUpload},
 		{"POST", "/v1/uploads", classUploadCreate},
 		{"POST", "/v1/billing/purchase", classPurchase},
 		{"POST", "/v1/billing/setup-session", classPurchase},
@@ -379,7 +379,7 @@ func TestDoesNotRetryABodyItCannotReplay(t *testing.T) {
 func TestNeverSetsAnIdempotencyKeyHeaderItself(t *testing.T) {
 	srv := newScriptedServer(t, okBody)
 	c := newTestClient(t, srv.URL, newFakeClock())
-	_, err := do(t, c, http.MethodPost, "/v1/uploads", `{}`)
+	_, err := do(t, c, http.MethodPost, "/v1/uploads", `{"idempotency_key":"k"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +405,7 @@ func TestPacesUploadCreatesToFourPerMinute(t *testing.T) {
 	clock := newFakeClock()
 	c := newTestClient(t, srv.URL, clock)
 	for i := range 5 {
-		_, err := do(t, c, http.MethodPost, "/v1/uploads", `{}`)
+		_, err := do(t, c, http.MethodPost, "/v1/uploads", `{"idempotency_key":"k"}`)
 		if err != nil {
 			t.Fatalf("create %d: %v", i, err)
 		}
@@ -469,7 +469,7 @@ func TestBacksOffFifteenThirtySixtyWhenACreateIsRateLimitedWithoutRetryAfter(t *
 func TestRaisesAfterThreeRateLimitBackoffsOnCreate(t *testing.T) {
 	srv := newScriptedServer(t, rateLimited(nil))
 	c := newTestClient(t, srv.URL, newFakeClock())
-	_, err := do(t, c, http.MethodPost, "/v1/uploads", `{}`)
+	_, err := do(t, c, http.MethodPost, "/v1/uploads", `{"idempotency_key":"k"}`)
 	if e := asError(t, err); e.Kind != KindRateLimit || srv.count() != 4 {
 		t.Errorf("kind %v, %d requests", e.Kind, srv.count())
 	}
@@ -479,7 +479,7 @@ func TestUsesRetryAfterOnCreateWhenTheServerSendsIt(t *testing.T) {
 	srv := newScriptedServer(t, rateLimited(map[string]string{"Retry-After": "9"}), okBody)
 	clock := newFakeClock()
 	c := newTestClient(t, srv.URL, clock)
-	if _, err := do(t, c, http.MethodPost, "/v1/uploads", `{}`); err != nil {
+	if _, err := do(t, c, http.MethodPost, "/v1/uploads", `{"idempotency_key":"k"}`); err != nil {
 		t.Fatal(err)
 	}
 	if got := clock.slept(); len(got) != 1 || got[0] != 9*time.Second {
@@ -496,7 +496,7 @@ func TestWaitsThirtySecondsBetweenTriesWhenTooManyJobsAreActive(t *testing.T) {
 	srv := newScriptedServer(t, append(steps, okBody)...)
 	clock := newFakeClock()
 	c := newTestClient(t, srv.URL, clock)
-	if _, err := do(t, c, http.MethodPost, "/v1/uploads", `{}`); err != nil {
+	if _, err := do(t, c, http.MethodPost, "/v1/uploads", `{"idempotency_key":"k"}`); err != nil {
 		t.Fatal(err)
 	}
 	waits := 0
@@ -513,7 +513,7 @@ func TestWaitsThirtySecondsBetweenTriesWhenTooManyJobsAreActive(t *testing.T) {
 func TestRaisesAfterTenTriesWhenTooManyJobsStayActive(t *testing.T) {
 	srv := newScriptedServer(t, step{status: 429, body: jsonError("too_many_active_jobs", 5001)})
 	c := newTestClient(t, srv.URL, newFakeClock())
-	_, err := do(t, c, http.MethodPost, "/v1/uploads", `{}`)
+	_, err := do(t, c, http.MethodPost, "/v1/uploads", `{"idempotency_key":"k"}`)
 	if e := asError(t, err); e.Code != "too_many_active_jobs" || e.Kind != KindRateLimit || srv.count() != 10 {
 		t.Errorf("code %q kind %v, %d requests", e.Code, e.Kind, srv.count())
 	}
@@ -522,7 +522,7 @@ func TestRaisesAfterTenTriesWhenTooManyJobsStayActive(t *testing.T) {
 func TestMaxRetriesZeroDisablesEveryCreateBackoff(t *testing.T) {
 	srv := newScriptedServer(t, rateLimited(nil))
 	c := newTestClient(t, srv.URL, newFakeClock(), WithMaxRetries(0))
-	if _, err := do(t, c, http.MethodPost, "/v1/uploads", `{}`); err == nil || srv.count() != 1 {
+	if _, err := do(t, c, http.MethodPost, "/v1/uploads", `{"idempotency_key":"k"}`); err == nil || srv.count() != 1 {
 		t.Errorf("%d requests", srv.count())
 	}
 }
@@ -652,7 +652,7 @@ func TestOnlyTheirOwnRateLimitsCountTowardTheCreateSchedules(t *testing.T) {
 	srv := newScriptedServer(t, steps...)
 	clock := newFakeClock()
 	c := newTestClient(t, srv.URL, clock)
-	if _, err := do(t, c, http.MethodPost, "/v1/uploads", `{}`); err != nil {
+	if _, err := do(t, c, http.MethodPost, "/v1/uploads", `{"idempotency_key":"k"}`); err != nil {
 		t.Fatalf("after %d requests: %v", srv.count(), err)
 	}
 	if srv.count() != 6 {
@@ -662,7 +662,7 @@ func TestOnlyTheirOwnRateLimitsCountTowardTheCreateSchedules(t *testing.T) {
 	busy := step{status: 429, body: jsonError("too_many_active_jobs", 5001)}
 	srv = newScriptedServer(t, busy, busy, rateLimited(nil), rateLimited(nil), rateLimited(nil), okBody)
 	c = newTestClient(t, srv.URL, newFakeClock())
-	if _, err := do(t, c, http.MethodPost, "/v1/uploads", `{}`); err != nil {
+	if _, err := do(t, c, http.MethodPost, "/v1/uploads", `{"idempotency_key":"k"}`); err != nil {
 		t.Fatalf("after %d requests: %v", srv.count(), err)
 	}
 }

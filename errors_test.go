@@ -225,7 +225,7 @@ func TestUsesTheStatusForAnUnknownSlug(t *testing.T) {
 func TestNeverLetsTheTokenIntoAnythingAnErrorExposes(t *testing.T) {
 	body := `{"error":"unauthorized","code":2000,"details":{"echo":"` + testToken + `","nested":["` + testToken + `"]},"note":"` + testToken + `"}`
 	e := fromResponse(401, nil, body, http.MethodGet, "/v1/account")
-	wrapped := newSDKError(KindNetwork, "network_error", "GET failed", errors.New("dial "+testToken), redactor{token: testToken})
+	wrapped := newSDKError(KindNetwork, "network_error", "GET failed", errors.New("dial "+testToken), redactor{token: testToken}, hintInputs{})
 	for name, text := range map[string]string{
 		"message": e.Message, "hint": e.Hint, "details": asText(e.Details), "error": e.Error(),
 		"wrapped": wrapped.Error(), "cause": wrapped.Unwrap().Error(), "verbose": fmt.Sprintf("%+v %#v", e, wrapped),
@@ -237,7 +237,7 @@ func TestNeverLetsTheTokenIntoAnythingAnErrorExposes(t *testing.T) {
 }
 
 func TestSDKErrorsCarryHintsAndTheirCause(t *testing.T) {
-	e := newSDKError(KindAbort, "aborted", "The request was cancelled.", context.Canceled, redactor{})
+	e := newSDKError(KindAbort, "aborted", "The request was cancelled.", context.Canceled, redactor{}, hintInputs{})
 	if !errors.Is(e, context.Canceled) {
 		t.Error("the cause is not reachable through errors.Is")
 	}
@@ -245,7 +245,7 @@ func TestSDKErrorsCarryHintsAndTheirCause(t *testing.T) {
 	if !errors.As(fmt.Errorf("outer: %w", e), &target) || target.Kind != KindAbort {
 		t.Error("errors.As does not find the SDK error")
 	}
-	hinted := newSDKError(KindUpload, "wrong_state", "x", nil, redactor{})
+	hinted := newSDKError(KindUpload, "wrong_state", "x", nil, redactor{}, hintInputs{})
 	if !strings.Contains(hinted.Hint, "hs.jobs.get") {
 		t.Errorf("hint for an SDK slug = %q", hinted.Hint)
 	}
