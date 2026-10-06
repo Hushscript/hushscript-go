@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"os"
 	"strings"
 )
 
@@ -92,10 +93,8 @@ func (c Client) Resume(ctx context.Context, token string, opts *ResumeOptions) (
 	if err != nil {
 		return nil, err
 	}
-	defer src.close()
-	if src != nil && src.size != state.Size {
-		return nil, newSDKError(KindResumeMismatch, "resume_file_mismatch",
-			"The file is "+formatInt(src.size)+" bytes; the upload started with "+formatInt(state.Size)+" bytes.", nil, red, hintInputs{})
+	if size, known := knownSize(src, opts.Path); known && size != state.Size {
+		return nil, fileMismatch(red, size, state.Size)
 	}
 	r := &run{core: p, state: state, token: token, src: src, concurrency: concurrency, waitTimeout: waitTimeout, onProgress: opts.OnProgress}
 	job, err := p.readJob(ctx, state.JobID)
@@ -109,9 +108,23 @@ func (c Client) Resume(ctx context.Context, token string, opts *ResumeOptions) (
 	if job.State != "uploading" {
 		return r.finish(ctx, job.State, nil, job)
 	}
+	if src == nil && opts.Path != "" {
+		// The path is opened only now: a job past uploading never needed the file.
+		if src, err = openPath(opts.Path, red); err != nil {
+			return nil, err
+		}
+		defer src.close()
+		if src.size != state.Size {
+			return nil, fileMismatch(red, src.size, state.Size)
+		}
+		r.src = src
+	}
 	if src == nil {
 		return nil, newSDKError(KindResumeMismatch, "resume_file_required",
 			"The upload is not finished, so resuming needs the original file.", nil, red, hintInputs{})
+	}
+	if opts.OnProgress != nil {
+		opts.OnProgress(Progress{Stage: StageUploading, BytesTotal: src.size})
 	}
 	created, err := p.createUpload(ctx, createBody{
 		SizeBytes:       state.Size,
@@ -127,12 +140,34 @@ func (c Client) Resume(ctx context.Context, token string, opts *ResumeOptions) (
 	return r.finish(ctx, created.State, planOf(created), nil)
 }
 
+func fileMismatch(red redactor, got, want int64) *Error {
+	return newSDKError(KindResumeMismatch, "resume_file_mismatch",
+		"The file is "+formatInt(got)+" bytes; the upload started with "+formatInt(want)+" bytes.", nil, red, hintInputs{})
+}
+
+// knownSize is the size of the file the caller gave, without opening a Path: a Path that cannot be
+// stat'd is left for the moment it is needed, so a resume of a finished job never fails on it.
+func knownSize(src *fileSource, path string) (int64, bool) {
+	if src != nil {
+		return src.size, true
+	}
+	if path == "" {
+		return 0, false
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return 0, false
+	}
+	return info.Size(), true
+}
+
+// resumeSource is the Reader the caller gave, if any. A Path is not opened here (see Resume).
 func resumeSource(opts *ResumeOptions, red redactor) (*fileSource, error) {
 	switch {
 	case opts.Path != "" && opts.Reader != nil:
 		return nil, invalidOption(red, "Give the original file as Path or as Reader, not both.", nil)
 	case opts.Path != "":
-		return openPath(opts.Path, red)
+		return nil, nil
 	case opts.Reader != nil:
 		if opts.Size <= 0 {
 			return nil, invalidOption(red, "Size must be the file's size in bytes, above 0.", nil)

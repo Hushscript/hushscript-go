@@ -255,20 +255,6 @@ func (f *fakeAPI) count(route string) int {
 	return n
 }
 
-// totalExceptParts counts every request but the part uploads, which can still arrive from an
-// earlier, cancelled run after its call has returned.
-func (f *fakeAPI) totalExceptParts() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	n := 0
-	for i := range f.log {
-		if r := f.log[i].route; r != "r2" && r != "part" {
-			n++
-		}
-	}
-	return n
-}
-
 func (f *fakeAPI) total() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

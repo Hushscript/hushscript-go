@@ -185,9 +185,13 @@ func resume(ctx context.Context, e *env, args map[string]any) (map[string]any, e
 	return transcriptResult(got)
 }
 
-// probeDurations runs the SDK's duration probe over every file of durations.json. A container the
-// SDK does not support (the WebM renamed to .mp3) is a pass when the SDK refuses it by its bytes, as
-// the unsupported-media scenario requires.
+// refusedByItsBytes is the one file of durations.json the SDK must not sniff: a WebM renamed to .mp3,
+// which the unsupported-media scenario requires it to refuse. Any other file that sniffs as unknown is
+// a failure.
+const refusedByItsBytes = "webm-renamed.mp3"
+
+// probeDurations runs the SDK's duration probe over every file of durations.json: each must probe to
+// its listed duration, except refusedByItsBytes, which must be refused by its bytes.
 func probeDurations(ctx context.Context, e *env, args map[string]any) (map[string]any, error) {
 	tolerance, _ := args["toleranceSeconds"].(float64)
 	path, err := e.media(ctx, "media/durations.json")
@@ -210,7 +214,7 @@ func probeDurations(ctx context.Context, e *env, args map[string]any) (map[strin
 		}
 		got, probeErr := probeFile(file)
 		switch {
-		case errors.Is(probeErr, errUnsupported):
+		case errors.Is(probeErr, errUnsupported) && name == refusedByItsBytes:
 		case probeErr != nil, got-want > tolerance, want-got > tolerance, math.Ceil(got) < want-1e-6:
 			failures = append(failures, map[string]any{"file": name, "expected": want, "got": got})
 		}

@@ -84,7 +84,7 @@ func (r *run) sendAndComplete(ctx context.Context, plan *uploadPlan) (string, er
 			Parts []completedPart `json:"parts"`
 		}{acks})
 		if marshalErr != nil {
-			return "", newSDKError(KindUpload, "upload_failed", "The complete request could not be built.", marshalErr, c.cfg.redactor(), hintInputs{})
+			return "", c.requestNotBuilt(marshalErr)
 		}
 		body = bytes.NewReader(encoded)
 	} else {
@@ -94,12 +94,13 @@ func (r *run) sendAndComplete(ctx context.Context, plan *uploadPlan) (string, er
 			return nil
 		})
 	}
+	const route = "POST /v1/uploads/{job}/complete"
 	response, err := c.api.CompleteUploadWithBodyWithResponse(ctx, r.state.JobID, "application/json", body, editors...)
 	if err != nil {
-		return "", err
+		return "", c.readFailed(err, route)
 	}
-	if response.JSON200 == nil {
-		return "", c.badResponse("POST /v1/uploads/{job}/complete")
+	if failure := c.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "state"); failure != nil {
+		return "", failure
 	}
 	return response.JSON200.State, nil
 }
@@ -452,7 +453,7 @@ func (u *uploader) putProxied(ctx context.Context, n int, data []byte, hold *bod
 	target := u.core.cfg.baseURL + "/v1/uploads/" + url.PathEscape(u.job) + "/parts/" + strconv.Itoa(n)
 	req, err := partRequest(withAttemptTimeout(ctx, partTimeout), target, data, hold)
 	if err != nil {
-		return newSDKError(KindUpload, "upload_failed", "The part request could not be built.", err, u.red, hintInputs{})
+		return u.core.requestNotBuilt(err)
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	resp, err := u.core.doer.Do(req)
@@ -550,12 +551,13 @@ func (p *partPages) fetchPage(ctx context.Context, start int) error {
 }
 
 func (p *partPages) load(ctx context.Context, start int) error {
+	const route = "GET /v1/uploads/{job}/part-urls"
 	response, err := p.core.api.GetUploadPartUrlsWithResponse(ctx, p.job, &generated.GetUploadPartUrlsParams{Start: &start})
 	if err != nil {
-		return err
+		return p.core.readFailed(err, route)
 	}
-	if response.JSON200 == nil {
-		return p.core.badResponse("GET /v1/uploads/{job}/part-urls")
+	if failure := p.core.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "part_urls"); failure != nil {
+		return failure
 	}
 	if len(response.JSON200.PartUrls) == 0 {
 		p.mu.Lock()

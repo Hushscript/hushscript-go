@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"net/http"
 	"net/url"
@@ -147,10 +148,17 @@ func TestAFileOnDiskIsUploadedByPath(t *testing.T) {
 	if err != nil || got.ID != "tr_1" {
 		t.Fatalf("Transcribe = %v, %v", got, err)
 	}
-	if _, err := r.client.Transcribe(context.Background(), filepath.Join(t.TempDir(), "missing"), nil); err == nil {
-		t.Error("a missing file is not an error")
-	} else {
-		_ = wantCode(t, err, KindPreflight, "invalid_option")
+	missing := filepath.Join(t.TempDir(), "missing")
+	_, err = r.client.Transcribe(context.Background(), missing, nil)
+	e := wantCode(t, err, KindPreflight, "file_unreadable")
+	if !errors.Is(err, fs.ErrNotExist) || !e.Kind.IsPreflight() {
+		t.Errorf("a missing file should be a PreflightError with the OS error as its cause: %v", err)
+	}
+	before := r.api.total()
+	_, err = r.client.Transcribe(context.Background(), t.TempDir(), nil)
+	e = wantCode(t, err, KindPreflight, "file_unreadable")
+	if e.IdempotencyKey != "" || r.api.total() != before {
+		t.Errorf("a directory reached the API: %+v", e)
 	}
 }
 
@@ -618,10 +626,11 @@ func TestAReplayThatReturnsAnotherJobStopsWithoutFurtherRequests(t *testing.T) {
 		}
 		return 0, "", false
 	})
-	before := r.api.totalExceptParts()
+	waitFor(t, func() bool { return r.api.inFlight.Load() == 0 }) // a part of the cancelled run may still be arriving
+	before := r.api.total()
 	_, err := r.client.Resume(context.Background(), token, &ResumeOptions{Reader: bytes.NewReader(r.wav), Size: int64(len(r.wav))})
 	_ = wantCode(t, err, KindResumeMismatch, "resume_job_missing")
-	if sent := r.api.totalExceptParts() - before; sent != 2 { // the job read and the replay, nothing else
+	if sent := r.api.total() - before; sent != 2 { // the job read and the replay, nothing else
 		t.Errorf("%d requests after the replay returned another job, want 2 in all", sent)
 	}
 }
@@ -692,6 +701,8 @@ func TestInvalidOptionsAreRefusedBeforeAnyRequestAndNeverClamped(t *testing.T) {
 		"short key":              {IdempotencyKey: "short"},
 		"long key":               {IdempotencyKey: strings.Repeat("k", 129)},
 		"key with a newline":     {IdempotencyKey: "0123456789abcdef\n"},
+		"key with a space":       {IdempotencyKey: "0123456789abcde f"},
+		"key with a DEL":         {IdempotencyKey: "0123456789abcdef\x7f"},
 		"key with non-ASCII":     {IdempotencyKey: "0123456789abcdefé"},
 		"medical without lang":   {Medical: true},
 		"medical in Japanese":    {Medical: true, Language: "ja"},

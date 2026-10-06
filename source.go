@@ -14,11 +14,17 @@ type fileSource struct {
 	closer io.Closer
 }
 
+// fileUnreadable is the PreflightError for a Path that cannot be opened, stat'd or read as a file; the
+// operating system's error stays reachable for errors.Is(err, fs.ErrNotExist) and the like.
+func fileUnreadable(red redactor, message string, cause error) *Error {
+	return newSDKError(KindPreflight, "file_unreadable", message, cause, red, hintInputs{})
+}
+
 // openPath opens the file at path. The caller closes the source.
 func openPath(path string, red redactor) (*fileSource, error) {
 	file, err := os.Open(path) //nolint:gosec // opening the file the caller named is the point
 	if err != nil {
-		return nil, invalidOption(red, "The file could not be opened.", err)
+		return nil, fileUnreadable(red, "The file could not be opened.", err)
 	}
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
@@ -26,7 +32,7 @@ func openPath(path string, red redactor) (*fileSource, error) {
 		if err == nil {
 			err = errors.New("not a regular file")
 		}
-		return nil, invalidOption(red, "The file could not be read: it is not a regular file.", err)
+		return nil, fileUnreadable(red, "The file could not be read: it is not a regular file.", err)
 	}
 	return &fileSource{r: file, size: info.Size(), closer: file}, nil
 }

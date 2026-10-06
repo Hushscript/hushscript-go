@@ -5,8 +5,12 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -90,7 +94,7 @@ func TestMemoryStaysWithinConcurrencyTimesPartSizeWhateverTheFileSize(t *testing
 	allocated := int64(after.TotalAlloc - before.TotalAlloc) //nolint:gosec // as above
 	t.Logf("part size %d MiB, concurrency %d: bound %d MiB; file %d MiB; peak heap growth %.1f MiB; total allocated %.1f MiB",
 		part>>20, concurrency, concurrency*part>>20, size>>20, float64(growth)/(1<<20), float64(allocated)/(1<<20))
-	const slack = 24 << 20
+	const slack = 4 << 20
 	if growth > concurrency*part+slack {
 		t.Errorf("peak heap grew by %d MiB, want at most %d MiB (concurrency x part size) plus slack", growth>>20, concurrency*part>>20)
 	}
@@ -342,5 +346,190 @@ func TestACancelDuringALateBodyCloseReturnsAtOnce(t *testing.T) {
 	_ = wantCode(t, err, KindAbort, "aborted")
 	if took := returned.Sub(cancelledAt); took > 400*time.Millisecond {
 		t.Errorf("Transcribe returned %v after the cancel, waiting for a transport that closes late", took)
+	}
+}
+
+// uploadingToken starts a transcription, cancels it during the first part and returns the resume
+// token of the job, which the fake still reports as uploading.
+func uploadingToken(t *testing.T, r *rig) string {
+	t.Helper()
+	var token string
+	r.api.mu.Lock()
+	r.api.jobStates, r.api.jobReads = []string{"uploading"}, 0
+	r.api.mu.Unlock()
+	cancelled, cancel := context.WithCancel(context.Background())
+	r.api.setHook(func(s *seen) (int, string, bool) {
+		if s.route == "r2" || s.route == "part" {
+			cancel()
+			return 500, "down", true
+		}
+		return 0, "", false
+	})
+	_, err := r.client.TranscribeReader(cancelled, bytes.NewReader(r.wav), int64(len(r.wav)), &TranscribeOptions{OnResumeToken: func(s string) { token = s }})
+	_ = wantCode(t, err, KindAbort, "aborted")
+	r.api.setHook(nil)
+	return token
+}
+
+func TestResumeOpensItsPathOnlyWhileTheJobIsUploading(t *testing.T) {
+	r := newRig(t)
+	missing := filepath.Join(t.TempDir(), "gone.wav")
+
+	token := timedOut(t, r) // the upload is complete; the job is processing
+	r.api.mu.Lock()
+	r.api.jobStates, r.api.jobReads = []string{"processing", "done"}, 0
+	r.api.mu.Unlock()
+	got, err := r.client.Resume(context.Background(), token, &ResumeOptions{Path: missing})
+	if err != nil || got.ID != "tr_1" {
+		t.Fatalf("Resume of a finished upload with a Path that no longer exists = %v, %v", got, err)
+	}
+
+	r = newRig(t)
+	token = uploadingToken(t, r)
+	creates := r.api.count("create")
+	_, err = r.client.Resume(context.Background(), token, &ResumeOptions{Path: missing})
+	e := wantCode(t, err, KindPreflight, "file_unreadable")
+	if !errors.Is(err, fs.ErrNotExist) || e.ResumeToken != token {
+		t.Errorf("a needed file that is missing: %+v (is ErrNotExist %t)", e, errors.Is(err, fs.ErrNotExist))
+	}
+	if r.api.count("create") != creates {
+		t.Error("the create was replayed without a file to upload")
+	}
+
+	other := filepath.Join(t.TempDir(), "other.wav")
+	if err := os.WriteFile(other, testWAV(21), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := r.api.total()
+	_, err = r.client.Resume(context.Background(), token, &ResumeOptions{Path: other})
+	_ = wantCode(t, err, KindResumeMismatch, "resume_file_mismatch")
+	if r.api.total() != before {
+		t.Errorf("%d requests were sent for a file of another size", r.api.total()-before)
+	}
+
+	path := filepath.Join(t.TempDir(), "same.wav")
+	if err := os.WriteFile(path, r.wav, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.api.mu.Lock()
+	r.api.jobStates, r.api.jobReads = []string{"uploading", "processing", "done"}, 0
+	r.api.mu.Unlock()
+	if got, err := r.client.Resume(context.Background(), token, &ResumeOptions{Path: path}); err != nil || got.ID != "tr_1" {
+		t.Fatalf("Resume with the original file as a Path = %v, %v", got, err)
+	}
+}
+
+func TestResumeReportsZeroPercentBeforeItsReplayedCreate(t *testing.T) {
+	r := newRig(t)
+	token := uploadingToken(t, r)
+	creates := r.api.count("create")
+	r.api.mu.Lock()
+	r.api.jobStates, r.api.jobReads = []string{"uploading", "processing", "done"}, 0
+	r.api.mu.Unlock()
+	var first *Progress
+	createsAtFirst := -1
+	_, err := r.client.Resume(context.Background(), token, &ResumeOptions{
+		Reader: bytes.NewReader(r.wav), Size: int64(len(r.wav)),
+		OnProgress: func(p Progress) {
+			if first == nil {
+				first, createsAtFirst = &p, r.api.count("create")
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == nil || *first != (Progress{Stage: StageUploading, BytesTotal: int64(len(r.wav))}) {
+		t.Fatalf("first report = %+v, want 0%% uploading", first)
+	}
+	if createsAtFirst != creates {
+		t.Errorf("the 0%% report came after the replayed create (%d creates, was %d)", createsAtFirst, creates)
+	}
+}
+
+func TestAnUnusableSuccessBodyIsBadResponseWithTheStatusItCameWith(t *testing.T) {
+	cases := []struct {
+		name, route, body string
+		created           bool // the create was sent, so the error carries the key
+	}{
+		{"account {}", "account", `{}`, false},
+		{"account null", "account", `null`, false},
+		{"account mistyped", "account", `{"balance_seconds":"x","limits":{"used_today_seconds":0,"max_daily_seconds":9}}`, false},
+		{"account truncated", "account", `{"balance_seconds":`, false},
+		{"account without limits", "account", `{"balance_seconds":100000}`, false},
+		{"create {}", "create", `{}`, true},
+		{"create null", "create", `null`, true},
+		{"create mistyped", "create", `{"job_id":7,"state":"uploading"}`, true},
+		{"complete {}", "complete", `{}`, true},
+		{"complete null", "complete", `null`, true},
+		{"job {}", "job", `{}`, true},
+		{"job mistyped", "job", `{"id":"job_1","state":5}`, true},
+		{"transcript not an object", "transcript", `[]`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			r.api.setHook(func(s *seen) (int, string, bool) {
+				if s.route == tc.route {
+					return 200, tc.body, true
+				}
+				return 0, "", false
+			})
+			_, err := r.transcribe(nil)
+			e := wantCode(t, err, KindAPI, "bad_response")
+			if e.Status != 200 || e.Kind.IsPreflight() {
+				t.Errorf("status %d, preflight %t", e.Status, e.Kind.IsPreflight())
+			}
+			if tc.created != (e.IdempotencyKey != "") {
+				t.Errorf("idempotency key %q on an error where created = %t", e.IdempotencyKey, tc.created)
+			}
+			if !tc.created && r.api.count("create") != 0 {
+				t.Error("a create was sent after a preflight answer the SDK could not use")
+			}
+		})
+	}
+}
+
+func TestJobsWaitMapsAnUnusableJobBodyToBadResponse(t *testing.T) {
+	for name, body := range map[string]string{"empty object": `{}`, "null": `null`, "mistyped": `{"id":"job_1","state":{}}`, "truncated": `{"id":`} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			r.api.setHook(func(s *seen) (int, string, bool) {
+				if s.route == "job" {
+					return 200, body, true
+				}
+				return 0, "", false
+			})
+			_, err := r.client.Jobs.Wait(context.Background(), "job_1", nil)
+			e := wantCode(t, err, KindAPI, "bad_response")
+			if e.Status != 200 {
+				t.Errorf("status %d, want 200", e.Status)
+			}
+		})
+	}
+}
+
+func TestHasFieldsNeedsEveryDottedPathPresentAndNotNull(t *testing.T) {
+	for _, tc := range []struct {
+		body  string
+		paths []string
+		want  bool
+	}{
+		{`{"a":1}`, []string{"a"}, true},
+		{`{"a":0,"b":{"c":false}}`, []string{"a", "b.c"}, true},
+		{`{"a":[]}`, []string{"a"}, true},
+		{`{}`, []string{"a"}, false},
+		{`{"a":null}`, []string{"a"}, false},
+		{`{"b":null}`, []string{"b.c"}, false},
+		{`{"b":5}`, []string{"b.c"}, false},
+		{`{"b":{}}`, []string{"b.c"}, false},
+		{`null`, nil, false},
+		{`[]`, nil, false},
+		{``, nil, false},
+		{`{"a":1}`, nil, true},
+	} {
+		if got := hasFields([]byte(tc.body), tc.paths); got != tc.want {
+			t.Errorf("hasFields(%s, %v) = %t, want %t", tc.body, tc.paths, got, tc.want)
+		}
 	}
 }
