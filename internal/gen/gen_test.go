@@ -115,7 +115,7 @@ func TestCarriesAHintForEverySlugOfSpecSection93(t *testing.T) {
 		"pat_purchase_requires_app", "pat_purchase_requires_authentication", "no_default_card",
 		"unsupported_media", "duration_unreadable", "duration_out_of_range", "size_out_of_range",
 		"daily_limit", "policy_version_stale", "wrong_state", "resume_file_mismatch",
-		"resume_file_required",
+		"resume_file_required", "resume_job_missing", "stream_size_mismatch",
 	}
 	if got := generated.HintSlugs(); len(got) != len(want) {
 		t.Errorf("hints table has %d slugs, want %d: %v", len(got), len(want), got)
