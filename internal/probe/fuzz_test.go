@@ -17,7 +17,7 @@ func FuzzDuration(f *testing.F) {
 	}
 	f.Add(truncated)
 	f.Add(pcmWAV(16000, make([]byte, 64)))
-	f.Add(flacInfo(4608, 4608, 100, 400, 16000, 1, 16, 320000))
+	f.Add(flacInfo(4608, 4608, 100, 400, 16000, 1, 320000))
 	f.Add(join(ftyp(), mp4Box("moov", mvhdV0(1000, 20000))))
 	f.Add(join(ftyp(), mp4Box("moov", mvhdV1(1000, 20000))))
 	f.Add(opusFile(312, 960312))

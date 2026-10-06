@@ -36,8 +36,8 @@ func pcmWAV(dataSize uint32, data []byte, extra ...[]byte) []byte {
 	return join([]byte("RIFF"), le32(0), []byte("WAVE"), wavFmt(1, 1, 8000, 2), join(extra...), wavChunk("data", dataSize, data))
 }
 
-func flacInfo(minBlock, maxBlock uint16, minFrame, maxFrame, rate uint32, channels, bits uint8, total uint64) []byte {
-	packed := uint64(rate)<<44 | uint64(channels-1)<<41 | uint64(bits-1)<<36 | total
+func flacInfo(minBlock, maxBlock uint16, minFrame, maxFrame, rate uint32, channels uint8, total uint64) []byte {
+	packed := uint64(rate)<<44 | uint64(channels-1)<<41 | uint64(15)<<36 | total
 	return join([]byte("fLaC"), []byte{0x80, 0, 0, 34}, be16(minBlock), be16(maxBlock),
 		be32(minFrame)[1:], be32(maxFrame)[1:], be64(packed), make([]byte, 16))
 }

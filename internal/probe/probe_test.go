@@ -163,13 +163,13 @@ func TestRefusesWAVThatCannotBeTrusted(t *testing.T) {
 
 func TestReadsFLACStreamInfo(t *testing.T) {
 	audio := make([]byte, 100000)
-	wantSeconds(t, "20 s", join(flacInfo(4608, 4608, 100, 400, 16000, 1, 16, 320000), audio), probe.FormatFLAC, 20)
-	wantSeconds(t, "unknown frame sizes skip the truncation bound", flacInfo(4608, 4608, 0, 0, 16000, 1, 16, 320000), probe.FormatFLAC, 20)
-	wantSeconds(t, "36 bit sample count", flacInfo(0, 0, 0, 0, 44100, 2, 16, 1<<35), probe.FormatFLAC, float64(uint64(1)<<35)/44100)
+	wantSeconds(t, "20 s", join(flacInfo(4608, 4608, 100, 400, 16000, 1, 320000), audio), probe.FormatFLAC, 20)
+	wantSeconds(t, "unknown frame sizes skip the truncation bound", flacInfo(4608, 4608, 0, 0, 16000, 1, 320000), probe.FormatFLAC, 20)
+	wantSeconds(t, "36 bit sample count", flacInfo(0, 0, 0, 0, 44100, 2, 1<<35), probe.FormatFLAC, float64(uint64(1)<<35)/44100)
 }
 
 func TestRefusesFLACThatCannotBeTrusted(t *testing.T) {
-	good := join(flacInfo(4608, 4608, 100, 400, 16000, 1, 16, 320000), make([]byte, 100000))
+	good := join(flacInfo(4608, 4608, 100, 400, 16000, 1, 320000), make([]byte, 100000))
 	notFirst := bytes.Clone(good)
 	notFirst[4] = 0x84
 	short := bytes.Clone(good)
@@ -179,9 +179,9 @@ func TestRefusesFLACThatCannotBeTrusted(t *testing.T) {
 		"cut inside STREAMINFO":   good[:30],
 		"STREAMINFO not first":    notFirst,
 		"STREAMINFO too short":    short,
-		"zero sample rate":        flacInfo(4608, 4608, 100, 400, 0, 1, 16, 320000),
-		"zero samples":            flacInfo(4608, 4608, 100, 400, 16000, 1, 16, 0),
-		"fewer bytes than frames": join(flacInfo(4608, 4608, 100, 400, 16000, 1, 16, 320000), make([]byte, 5000)),
+		"zero sample rate":        flacInfo(4608, 4608, 100, 400, 0, 1, 320000),
+		"zero samples":            flacInfo(4608, 4608, 100, 400, 16000, 1, 0),
+		"fewer bytes than frames": join(flacInfo(4608, 4608, 100, 400, 16000, 1, 320000), make([]byte, 5000)),
 	} {
 		wantUnreadable(t, name, data, probe.FormatFLAC)
 	}
