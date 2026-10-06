@@ -8,15 +8,20 @@ set -euo pipefail
 profile="${1:?coverprofile}"
 floor="${2:?floor in percent}"
 
+# With -coverpkg every test binary writes a line for every block, so a block appears once per binary:
+# counts are summed per block before judging it.
 awk -v floor="$floor" '
   NR == 1 { next }
   $1 ~ /\/generated\// || $1 ~ /\/scripts\// || $1 ~ /\/conformance\// || $1 ~ /\/smoke\// || $1 ~ /\/examples\// { next }
   {
-    stmts = $2
-    total += stmts
-    if ($3 > 0) covered += stmts
+    stmts[$1] = $2
+    hits[$1] += $3
   }
   END {
+    for (block in stmts) {
+      total += stmts[block]
+      if (hits[block] > 0) covered += stmts[block]
+    }
     if (total == 0) { print "coverage: no statements in the profile" > "/dev/stderr"; exit 1 }
     pct = 100 * covered / total
     printf "coverage: %.1f%% of %d statements (floor %s%%)\n", pct, total, floor

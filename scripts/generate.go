@@ -86,10 +86,10 @@ func run(ctx context.Context, args []string) error {
 		specText = append(specText, '\n')
 	}
 	files := map[string][]byte{
-		"openapi.json":           specText,
-		"generated/catalog.go":   catalog,
-		"generated/scopes.go":    scopes,
-		"generated/hints.go":     hintsSource,
+		"openapi.json":         specText,
+		"generated/catalog.go": catalog,
+		"generated/scopes.go":  scopes,
+		"generated/hints.go":   hintsSource,
 	}
 	for name, content := range files {
 		if err := os.WriteFile(name, content, generatedFileMode); err != nil { //nolint:gosec // repository sources, meant to be world-readable

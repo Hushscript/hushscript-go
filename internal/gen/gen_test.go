@@ -152,13 +152,13 @@ func TestEscapesQuotesAndNewlinesInEmittedStrings(t *testing.T) {
 func TestRejectsAMalformedCatalog(t *testing.T) {
 	duplicate := `{"code":1000,"slug":"bad_request","status":400,"meaning":"m"}`
 	cases := map[string]struct{ spec, want string }{
-		"duplicate slug":    {`{"x-error-catalog":[` + duplicate + `,` + duplicate + `]}`, "duplicate error slug"},
-		"no catalog":        {`{}`, "no x-error-catalog"},
-		"string code":       {`{"x-error-catalog":[{"slug":"a","code":"1","status":400,"meaning":"m"}]}`, "a.code must be an integer"},
-		"fractional code":   {`{"x-error-catalog":[{"slug":"a","code":1.5,"status":400,"meaning":"m"}]}`, "a.code must be an integer"},
-		"missing status":    {`{"x-error-catalog":[{"slug":"a","code":1,"meaning":"m"}]}`, "a.status must be an integer"},
-		"empty slug":        {`{"x-error-catalog":[{"slug":"","code":1,"status":400,"meaning":"m"}]}`, "slug must be a non-empty string"},
-		"empty meaning":     {`{"x-error-catalog":[{"slug":"a","code":1,"status":400,"meaning":""}]}`, "a.meaning must be a non-empty string"},
+		"duplicate slug":      {`{"x-error-catalog":[` + duplicate + `,` + duplicate + `]}`, "duplicate error slug"},
+		"no catalog":          {`{}`, "no x-error-catalog"},
+		"string code":         {`{"x-error-catalog":[{"slug":"a","code":"1","status":400,"meaning":"m"}]}`, "a.code must be an integer"},
+		"fractional code":     {`{"x-error-catalog":[{"slug":"a","code":1.5,"status":400,"meaning":"m"}]}`, "a.code must be an integer"},
+		"missing status":      {`{"x-error-catalog":[{"slug":"a","code":1,"meaning":"m"}]}`, "a.status must be an integer"},
+		"empty slug":          {`{"x-error-catalog":[{"slug":"","code":1,"status":400,"meaning":"m"}]}`, "slug must be a non-empty string"},
+		"empty meaning":       {`{"x-error-catalog":[{"slug":"a","code":1,"status":400,"meaning":""}]}`, "a.meaning must be a non-empty string"},
 		"entry not an object": {`{"x-error-catalog":[null]}`, "must be an object"},
 	}
 	for name, tc := range cases {
