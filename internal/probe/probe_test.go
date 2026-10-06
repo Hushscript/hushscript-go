@@ -189,7 +189,7 @@ func TestRefusesFLACThatCannotBeTrusted(t *testing.T) {
 
 func TestReadsTheMovieHeaderOfISOBMFF(t *testing.T) {
 	mdat := mp4Box("mdat", make([]byte, 50))
-	wantSeconds(t, "moov after mdat", join(ftyp(), mdat, mp4Box("moov", mp4Box("trak"), mvhdV0(1000, 20500))), probe.FormatISOBMFF, 20.5)
+	wantSeconds(t, "moov after mdat", join(ftyp(), mdat, mp4Box("moov", mp4Box("udta"), mvhdV0(1000, 20500))), probe.FormatISOBMFF, 20.5)
 	wantSeconds(t, "moov before mdat", join(ftyp(), mp4Box("moov", mvhdV0(44100, 441000)), mdat), probe.FormatISOBMFF, 10)
 	wantSeconds(t, "version 1", join(ftyp(), mp4Box("moov", mvhdV1(1000, 1<<33))), probe.FormatISOBMFF, float64(uint64(1)<<33)/1000)
 	large := join(be32(1), []byte("free"), be64(16+5), make([]byte, 5))
@@ -204,7 +204,7 @@ func TestRefusesISOBMFFThatCannotBeTrusted(t *testing.T) {
 	tiny := bytes.Repeat(mp4Box("free"), 20000)
 	for name, data := range map[string][]byte{
 		"no moov":                 join(ftyp(), mp4Box("mdat", make([]byte, 20))),
-		"no mvhd":                 join(ftyp(), mp4Box("moov", mp4Box("trak"))),
+		"no mvhd":                 join(ftyp(), mp4Box("moov", mp4Box("udta"))),
 		"timescale zero":          join(ftyp(), mp4Box("moov", mvhdV0(0, 100))),
 		"timescale zero v1":       join(ftyp(), mp4Box("moov", mvhdV1(0, 100))),
 		"unknown duration":        join(ftyp(), mp4Box("moov", mvhdV0(1000, 0xFFFFFFFF))),
