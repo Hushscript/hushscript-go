@@ -19,6 +19,11 @@ type Client struct {
 	Jobs JobsService
 	// Transcripts lists and reads finished transcripts.
 	Transcripts TranscriptsService
+	// Billing lists packs and cards, buys minutes and reads the purchase history.
+	Billing BillingService
+	// Agent rotates the token of an agent account. Signup and claim need no token: see AgentSignup
+	// and AgentClaim.
+	Agent AgentService
 
 	core *core
 }
@@ -41,13 +46,23 @@ func New(opts ...Option) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	c, err := newCore(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{
+		Jobs: JobsService{core: c}, Transcripts: TranscriptsService{core: c},
+		Billing: BillingService{core: c}, Agent: AgentService{core: c}, core: c,
+	}, nil
+}
+
+func newCore(cfg config) (*core, error) {
 	d := newDoer(cfg)
 	api, err := generated.NewClientWithResponses(cfg.baseURL, generated.WithHTTPClient(d))
 	if err != nil {
 		return nil, newSDKError(KindConfiguration, "config_invalid", "The generated client could not be built.", err, cfg.redactor(), hintInputs{})
 	}
-	c := &core{cfg: cfg, doer: d, api: api}
-	return &Client{Jobs: JobsService{core: c}, Transcripts: TranscriptsService{core: c}, core: c}, nil
+	return &core{cfg: cfg, doer: d, api: api}, nil
 }
 
 // API returns the generated client for every /v1 operation, sharing the SDK's retries, timeouts and

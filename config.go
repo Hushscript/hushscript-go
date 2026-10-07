@@ -204,26 +204,36 @@ func validToken(token string) bool {
 }
 
 // resolve applies the options, then the environment, then the defaults, and validates the result.
-func resolve(opts []Option) (config, error) {
+func resolve(opts []Option) (config, error) { return resolveConfig(opts, true) }
+
+// resolveTokenless is resolve for the calls that need no token (agent signup and claim): a token from
+// an option or the environment is ignored, and no request carries Authorization.
+func resolveTokenless(opts []Option) (config, error) { return resolveConfig(opts, false) }
+
+func resolveConfig(opts []Option, withToken bool) (config, error) {
 	var c config
 	for _, opt := range opts {
 		if err := opt(&c); err != nil {
 			return config{}, err
 		}
 	}
-	if c.token == "" {
-		c.token = secret(os.Getenv("HUSHSCRIPT_TOKEN"))
-	}
-	if c.token == "" {
-		failure := newConfigError(missingTokenMessage)
-		failure.Hint = missingTokenHint
-		return config{}, failure
-	}
-	if !validToken(c.token.reveal()) {
-		return config{}, newConfigError("The token contains characters a Hushscript token never has (printable ASCII only).")
-	}
-	if !strings.HasPrefix(c.token.reveal(), tokenPrefix) {
-		return config{}, newConfigError("This doesn't look like a Hushscript token.")
+	if withToken {
+		if c.token == "" {
+			c.token = secret(os.Getenv("HUSHSCRIPT_TOKEN"))
+		}
+		if c.token == "" {
+			failure := newConfigError(missingTokenMessage)
+			failure.Hint = missingTokenHint
+			return config{}, failure
+		}
+		if !validToken(c.token.reveal()) {
+			return config{}, newConfigError("The token contains characters a Hushscript token never has (printable ASCII only).")
+		}
+		if !strings.HasPrefix(c.token.reveal(), tokenPrefix) {
+			return config{}, newConfigError("This doesn't look like a Hushscript token.")
+		}
+	} else {
+		c.token = ""
 	}
 	c.tokens = newTokenBox(c.token.reveal())
 	if c.baseURL == "" {
