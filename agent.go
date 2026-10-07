@@ -3,6 +3,7 @@ package hushscript
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -68,6 +69,48 @@ type RotatedToken struct {
 	// ExpiresAt is nil when the token never expires.
 	ExpiresAt *time.Time
 }
+
+// redactedField stands in for a secret field in every text form of a result.
+const redactedField = "[redacted]"
+
+// String shows the result with ClaimSecret replaced by [redacted]; the field itself stays readable.
+func (r AgentSignupResult) String() string {
+	type plain AgentSignupResult // no methods, so printing it does not come back here
+	r.ClaimSecret = redactedField
+	return fmt.Sprintf("hushscript.AgentSignupResult%+v", plain(r))
+}
+
+// GoString is String, so %#v never shows the claim secret either.
+func (r AgentSignupResult) GoString() string { return r.String() }
+
+// Format covers every fmt verb, including %d and %x, which would otherwise print the struct fields.
+func (r AgentSignupResult) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, r.String()) }
+
+// String shows the account with Token replaced by [redacted]; the field itself stays readable.
+func (a AgentAccount) String() string {
+	type plain AgentAccount
+	a.Token = redactedField
+	return fmt.Sprintf("hushscript.AgentAccount%+v", plain(a))
+}
+
+// GoString is String, so %#v never shows the token either.
+func (a AgentAccount) GoString() string { return a.String() }
+
+// Format covers every fmt verb, including %d and %x, which would otherwise print the struct fields.
+func (a AgentAccount) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, a.String()) }
+
+// String shows the rotation with Token replaced by [redacted]; the field itself stays readable.
+func (r RotatedToken) String() string {
+	type plain RotatedToken
+	r.Token = redactedField
+	return fmt.Sprintf("hushscript.RotatedToken%+v", plain(r))
+}
+
+// GoString is String, so %#v never shows the successor token either.
+func (r RotatedToken) GoString() string { return r.String() }
+
+// Format covers every fmt verb, including %d and %x, which would otherwise print the struct fields.
+func (r RotatedToken) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, r.String()) }
 
 // AgentService is Client.Agent: the call an agent account makes with its own token.
 type AgentService struct {

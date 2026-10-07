@@ -137,20 +137,22 @@ pack in the app. A key that met 4021 is dead; a new `Buy` call mints a new one.
 
 A purchase is retried at most once, on a network error, a 502 or a 503, with the same idempotency
 key, so those retries cannot charge you twice. When `Buy` still gives up after the request was sent
-(the connection dropped twice, a 408, a 409, a server error, or an answer the SDK cannot use), the card
-may have been charged. Every such error carries `IdempotencyKey`; ask again with it and the purchase
-can never happen twice:
+(the connection dropped twice, a 401, a 408, a 409, a 429, a server error, or an answer the SDK
+cannot use), the card may have been charged. Every such error carries `IdempotencyKey`; ask again
+with it and the purchase can never happen twice:
 
 ```go
 purchase, err := client.Buy(ctx, "300min", &hushscript.BuyOptions{AcknowledgeNoRefund: true})
 var failure *hushscript.Error
 if errors.As(err, &failure) && failure.IdempotencyKey != "" {
 	switch failure.Status {
-	case 400, 401, 402, 403, 404, 422, 429:
-		// Only these refusals charged nothing (4021 and 4023 are 403).
+	case 400, 402, 403, 404, 422:
+		// Only these refusals charged nothing (4021 and 4023 are 403). A 401 or a 429 does not
+		// prove it: the server answers them before it replays a completed purchase, so after the
+		// SDK's one retry they can follow a first attempt that charged.
 	default:
-		// Anything else after the send may have charged: a 408, a 409, a 5xx, no status at all
-		// (a lost connection) or an unusable answer. Ask again with the same key.
+		// Anything else after the send may have charged: a 401, a 408, a 409, a 429, a 5xx, no
+		// status at all (a lost connection) or an unusable answer. Ask again with the same key.
 		purchase, err = client.Buy(ctx, "300min", &hushscript.BuyOptions{
 			AcknowledgeNoRefund: true,
 			IdempotencyKey:      failure.IdempotencyKey,
@@ -241,6 +243,10 @@ if err := keep(next.Token); err != nil {
   retried, because a retry could not succeed; its `Hint` says what to check. When the answer did carry
   a token but not the rest, `Error.ReceivedToken()` returns it so it is not lost; it never appears in a
   printed or encoded error.
+- `ClaimSecret`, `AgentAccount.Token` and `RotatedToken.Token` stay readable fields, but printing the result
+  with any `fmt` verb (`%v`, `%+v`, `%#v`, `%s`), a `Stringer` call or slog's text handler shows
+  `[redacted]` in their place. `json.Marshal` carries the value on purpose, so do not encode these
+  results into a log.
 - `DryRun: true` validates a signup without opening a checkout.
 
 ## Errors
@@ -326,7 +332,8 @@ instead, so a malformed answer comes back as an error, not a panic.
   fails, and gives you a resume token if the wait times out. The job keeps running.
 - **Reads the token per attempt.** After `RotateToken`, every later attempt, retries already queued
   included, sends the new token.
-- **Redacts the token** from every error, log line and formatted `Client`.
+- **Redacts the token** from every error, log line and formatted `Client`, and the secrets in the signup,
+  claim and rotation results from their printed forms.
 
 ## Supported formats
 
