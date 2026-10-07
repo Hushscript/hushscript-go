@@ -27,7 +27,7 @@ func TestTheWrongStateHintIsOnlyOnJobAndUploadOperations(t *testing.T) {
 			if e.Code != "wrong_state" || e.Kind != KindConflict {
 				t.Fatalf("error = %+v", e)
 			}
-			if got := strings.Contains(e.Hint, "hs.jobs.get(id)"); got != tc.hinted || (!tc.hinted && e.Hint != "") {
+			if got := strings.Contains(e.Hint, "Fetch the job"); got != tc.hinted || (!tc.hinted && e.Hint != "") {
 				t.Errorf("hint %q, want hinted=%v", e.Hint, tc.hinted)
 			}
 		})
