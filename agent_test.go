@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -637,5 +638,54 @@ func TestAnAnswerWhoseTokenIsOnlyWhitespaceLeavesNoReceivedToken(t *testing.T) {
 		if e := wantCode(t, err, KindOutcomeUnknown, "outcome_unknown"); e.ReceivedToken() != "" {
 			t.Errorf("rotate, pat %q: ReceivedToken %q", pat, e.ReceivedToken())
 		}
+	}
+}
+
+// R79: the three results that hand the caller a secret keep it as a readable field, show [redacted] in
+// its place in every text form, and carry it through json.Marshal (documented).
+func TestAResultThatHoldsASecretPrintsRedactedInPlaceOfItAndEncodesIt(t *testing.T) {
+	const secretText = "s3cr3t-value-0123456789"
+	expires := time.Unix(1_760_001_800, 0).UTC()
+	signup := AgentSignupResult{SignupID: "sg_1", ClaimSecret: secretText, CheckoutURL: "https://pay.example/c/1", ExpiresAt: expires}
+	account := AgentAccount{Token: secretText, UserID: "u_1", Scopes: []string{"read"}}
+	rotated := RotatedToken{Token: secretText, TokenID: "tk_1", Scopes: []string{"read"}, ExpiresAt: &expires}
+	cases := []struct {
+		name, typ string
+		field     string
+		value     any
+		pointer   any
+	}{
+		{"signup result", "AgentSignupResult", signup.ClaimSecret, signup, &signup},
+		{"account", "AgentAccount", account.Token, account, &account},
+		{"rotated token", "RotatedToken", rotated.Token, rotated, &rotated},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.field != secretText {
+				t.Fatal("the field is not readable")
+			}
+			for form, v := range map[string]any{"value": tc.value, "pointer": tc.pointer} {
+				for _, wrapped := range []any{v, []any{v}, map[string]any{"k": v}, struct{ V any }{v}} {
+					for _, verb := range leakVerbs {
+						if got := fmt.Sprintf(verb, wrapped); strings.Contains(got, secretText) {
+							t.Errorf("%s of the %s printed the secret: %s", verb, form, got)
+						}
+					}
+				}
+				for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+					if got := fmt.Sprintf(verb, v); !strings.Contains(got, redactedField) || !strings.Contains(got, tc.typ) {
+						t.Errorf("%s of the %s = %q, want the type and %s", verb, form, got, redactedField)
+					}
+				}
+				var logged bytes.Buffer
+				slog.New(slog.NewTextHandler(&logged, nil)).Info("m", "result", v)
+				if strings.Contains(logged.String(), secretText) {
+					t.Errorf("the slog text handler logged the secret for the %s: %s", form, logged.String())
+				}
+				if encoded, err := json.Marshal(v); err != nil || !strings.Contains(string(encoded), secretText) {
+					t.Errorf("json.Marshal of the %s = %s, %v: the value must ride along", form, encoded, err)
+				}
+			}
+		})
 	}
 }

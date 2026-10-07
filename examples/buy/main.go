@@ -69,10 +69,12 @@ func run(pack string, yes bool, key string) error {
 	return nil
 }
 
-// refusals are the statuses of an answer that charged nothing: the API refused the purchase (4021
-// and 4023 are 403, a rate limit 429). Any other outcome after the request was sent, a 408, a 409, a
-// 5xx, no status at all or an unusable answer, may have reached the card.
-var refusals = map[int]bool{400: true, 401: true, 402: true, 403: true, 404: true, 422: true, 429: true}
+// refusals are the statuses of an answer that charged nothing: one the server decides from the request
+// alone (400, a 403 for 4021 or 4023, 404, 422) or reaches after its completed-purchase replay (402).
+// A 401 and a 429 are answered before that replay, so after the SDK's one retry they can follow a
+// first attempt that did charge. Any other outcome after the request was sent, a 401, a 408, a 409, a
+// 429, a 5xx, no status at all or an unusable answer, may have reached the card.
+var refusals = map[int]bool{400: true, 402: true, 403: true, 404: true, 422: true}
 
 // mayHaveCharged reports whether a failed purchase may have reached the card: it was sent, and the
 // answer was not one of the listed refusals.
