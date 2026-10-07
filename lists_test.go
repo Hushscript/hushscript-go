@@ -305,7 +305,7 @@ func TestAListAnswerTheSDKCannotUseIsBadResponse(t *testing.T) {
 		body   string
 	}{
 		"empty object": {200, `{}`}, "null": {200, `null`}, "null rows": {200, `{"transcripts":null,"next_cursor":null}`},
-		"mistyped": {200, `{"transcripts":[{"id":5}]}`}, "truncated": {200, `{"transcripts":[`}, "201": {201, rowsPage(1, 1, "")},
+		"mistyped": {200, `{"transcripts":[{"id":5}]}`}, "truncated": {200, `{"transcripts":[`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			api := newListAPI(t, func(string, url.Values) (int, string) { return answer.status, answer.body })
@@ -493,7 +493,6 @@ func TestBalanceAndAccountRefuseAnAnswerWithoutTheirFields(t *testing.T) {
 		"empty": {200, `{}`, false}, "null": {200, `null`, false}, "no held": {200, `{"balance_seconds":5,"limits":{}}`, false},
 		"mistyped": {200, `{"balance_seconds":"5","held_seconds":0}`, false}, "truncated": {200, `{"balance_seconds":`, false},
 		"no limits": {200, `{"balance_seconds":5,"held_seconds":0}`, true},
-		"201":       {201, fmt.Sprintf(accountJSON(""), 5, 0, "null"), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			api := newListAPI(t, func(string, url.Values) (int, string) { return answer.status, answer.body })

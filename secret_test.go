@@ -218,7 +218,8 @@ func TestAnErrorAndAClientLogAsTheirRedactedText(t *testing.T) {
 		if _, leaked := firstMarker(buffer.String()); leaked {
 			t.Errorf("%s: %s", name, buffer.String())
 		}
-		if !strings.Contains(buffer.String(), "hushscript") {
+		// Only the pointer is a slog.LogValuer (a nil one must not panic); a copy of the struct is logged as data.
+		if !strings.HasSuffix(name, " value") && !strings.Contains(buffer.String(), "hushscript") {
 			t.Errorf("%s logged %s, want its text", name, buffer.String())
 		}
 	}

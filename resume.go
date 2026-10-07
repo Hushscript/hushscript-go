@@ -49,7 +49,7 @@ func decodeResumeToken(token string) (resumeState, error) {
 		return resumeState{}, errBadToken
 	}
 	state := body.resumeState
-	if body.V != resumeTokenVersion || state.JobID == "" || state.IdempotencyKey == "" || state.Size < 1 ||
+	if body.V != resumeTokenVersion || !safeSegment(state.JobID) || state.IdempotencyKey == "" || state.Size < 1 ||
 		math.IsNaN(state.DurationSeconds) || math.IsInf(state.DurationSeconds, 0) || state.DurationSeconds <= 0 {
 		return resumeState{}, errBadToken
 	}
@@ -126,7 +126,7 @@ func (c Client) Resume(ctx context.Context, token string, opts *ResumeOptions) (
 	if opts.OnProgress != nil {
 		opts.OnProgress(Progress{Stage: StageUploading, BytesTotal: src.size})
 	}
-	created, err := p.createUpload(ctx, createBody{
+	created, status, err := p.createUpload(ctx, createBody{
 		SizeBytes:       state.Size,
 		DurationSeconds: int(math.Ceil(state.DurationSeconds)),
 		IdempotencyKey:  state.IdempotencyKey,
@@ -137,7 +137,11 @@ func (c Client) Resume(ctx context.Context, token string, opts *ResumeOptions) (
 	if created.JobId != state.JobID {
 		return nil, p.jobMissing()
 	}
-	return r.finish(ctx, created.State, planOf(created), nil)
+	plan, failure := p.planOf(created, status)
+	if failure != nil {
+		return nil, failure
+	}
+	return r.finish(ctx, created.State, plan, nil)
 }
 
 func fileMismatch(red redactor, got, want int64) *Error {

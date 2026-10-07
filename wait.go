@@ -24,11 +24,12 @@ func (c *core) readJob(ctx context.Context, id string) (*Job, error) {
 	if err != nil {
 		return nil, c.readFailed(err, route)
 	}
-	if failure := c.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "id", "state", "created_at"); failure != nil {
+	parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
+	if failure := c.unusable(route, response.HTTPResponse, parsed != nil, response.Body, "id", "state", "created_at"); failure != nil {
 		return nil, failure
 	}
 	var body jobBody
-	if json.Unmarshal(response.Body, &body) != nil {
+	if json.Unmarshal(response.Body, &body) != nil || (body.TranscriptID != nil && !safeSegment(*body.TranscriptID)) {
 		return nil, c.badResponse(route, response.StatusCode())
 	}
 	return body.job(), nil
@@ -52,6 +53,21 @@ func (c *core) readFailed(err error, route string) error {
 		return c.badResponse(route, http.StatusOK)
 	}
 	return err
+}
+
+// decodedBody is the answer's JSON body as the operation's response type. The generated parser decodes
+// a 200 only, so any other 2xx (a 201, 202, 203 or 206) comes back with no body at all however well
+// formed it is; success is any 2xx with a usable body (spec section 7.4), so it is decoded here. nil
+// when there is no JSON body to use.
+func decodedBody[T any](parsed *T, response *http.Response, body []byte) *T {
+	if parsed != nil || response == nil || !strings.Contains(response.Header.Get("Content-Type"), "json") {
+		return parsed
+	}
+	var dest T
+	if json.Unmarshal(body, &dest) != nil {
+		return nil
+	}
+	return &dest
 }
 
 // unusable returns bad_response when the answer decoded to nothing (an unexpected content type) or
@@ -187,7 +203,8 @@ func (c *core) readTranscript(ctx context.Context, id string) (*Transcript, erro
 	if err != nil {
 		return nil, c.readFailed(err, route)
 	}
-	if failure := c.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, transcriptRequired...); failure != nil {
+	parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
+	if failure := c.unusable(route, response.HTTPResponse, parsed != nil, response.Body, transcriptRequired...); failure != nil {
 		return nil, failure
 	}
 	transcript, err := parseTranscript(response.Body)
@@ -207,6 +224,9 @@ func (j JobsService) Wait(ctx context.Context, id string, opts *WaitOptions) (*J
 		opts = &WaitOptions{}
 	}
 	red := j.core.cfg.redactor()
+	if err := checkID(red, "The job id", id); err != nil {
+		return nil, err
+	}
 	timeout, err := waitTimeoutOf(red, opts.WaitTimeout)
 	if err != nil {
 		return nil, err

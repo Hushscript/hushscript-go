@@ -56,9 +56,16 @@ func partRowsUsable(rows []generated.PresignedPartUrl) bool {
 	return true
 }
 
-func planOf(created *generated.UploadCreateResponse) *uploadPlan {
+// planOf reads the direct-upload plan of a create answer; nil stands for a proxied job. A part size
+// or part count that is not a positive whole number cannot be a plan at all: that is a bad_response
+// with the status the API answered with, not a bad_part_plan, which is for a plan that disagrees with
+// itself (the part count is not the file's size over the part size, checked by newUploader).
+func (c *core) planOf(created *generated.UploadCreateResponse, status int) (*uploadPlan, *Error) {
 	if created.Upload == nil {
-		return nil
+		return nil, nil
+	}
+	if created.Upload.PartSizeBytes < 1 || created.Upload.TotalParts < 1 {
+		return nil, c.badResponse("POST /v1/uploads", status)
 	}
 	plan := &uploadPlan{
 		partSize:   int64(created.Upload.PartSizeBytes),
@@ -68,7 +75,7 @@ func planOf(created *generated.UploadCreateResponse) *uploadPlan {
 	if created.Upload.NextPartNumber != nil {
 		plan.next = *created.Upload.NextPartNumber
 	}
-	return plan
+	return plan, nil
 }
 
 type completedPart struct {
@@ -123,10 +130,11 @@ func (r *run) sendAndComplete(ctx context.Context, plan *uploadPlan) (string, er
 	if err != nil {
 		return "", c.readFailed(err, route)
 	}
-	if failure := c.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "state"); failure != nil {
+	parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
+	if failure := c.unusable(route, response.HTTPResponse, parsed != nil, response.Body, "state"); failure != nil {
 		return "", failure
 	}
-	return response.JSON200.State, nil
+	return parsed.State, nil
 }
 
 const (
@@ -163,9 +171,6 @@ func (c *core) newUploader(r *run, plan *uploadPlan) (*uploader, error) {
 	partSize := int64(proxiedPartBytes)
 	if plan != nil {
 		partSize = plan.partSize
-	}
-	if partSize < 1 {
-		return nil, newSDKError(KindUpload, "bad_part_plan", "The API returned an unusable part size.", nil, red, hintInputs{})
 	}
 	total := int((r.src.size + partSize - 1) / partSize)
 	if plan != nil && plan.totalParts != total {
@@ -607,24 +612,25 @@ func (p *partPages) load(ctx context.Context, start int) error {
 	if err != nil {
 		return p.core.readFailed(err, route)
 	}
-	if failure := p.core.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "part_urls"); failure != nil {
+	parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
+	if failure := p.core.unusable(route, response.HTTPResponse, parsed != nil, response.Body, "part_urls"); failure != nil {
 		return failure
 	}
-	if !rowsHave(response.Body, "part_urls", "n", "url") || !partRowsUsable(response.JSON200.PartUrls) {
+	if !rowsHave(response.Body, "part_urls", "n", "url") || !partRowsUsable(parsed.PartUrls) {
 		return p.core.badResponse(route, response.StatusCode())
 	}
-	if len(response.JSON200.PartUrls) == 0 {
+	if len(parsed.PartUrls) == 0 {
 		p.mu.Lock()
 		p.direct = false
 		p.mu.Unlock()
 		return nil
 	}
-	stored := p.store(partURLsOf(response.JSON200.PartUrls))
+	stored := p.store(partURLsOf(parsed.PartUrls))
 	p.mu.Lock()
 	if p.next == stored {
 		p.next = 0
-		if response.JSON200.NextPartNumber != nil {
-			p.next = *response.JSON200.NextPartNumber
+		if parsed.NextPartNumber != nil {
+			p.next = *parsed.NextPartNumber
 		}
 	}
 	p.mu.Unlock()

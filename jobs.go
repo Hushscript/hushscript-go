@@ -116,6 +116,9 @@ func (j JobsService) Get(ctx context.Context, id string) (*Job, error) {
 	if j.core == nil {
 		return nil, newConfigError(notBuiltMessage)
 	}
+	if err := checkID(j.core.cfg.redactor(), "The job id", id); err != nil {
+		return nil, err
+	}
 	job, err := j.core.readJob(ctx, id)
 	if err != nil {
 		return nil, (&annotator{core: j.core}).annotate(ctx, err)
@@ -147,7 +150,8 @@ func (j JobsService) List(ctx context.Context, opts *JobListOptions) iter.Seq2[J
 		if err != nil {
 			return Page[Job]{}, core.readFailed(err, route)
 		}
-		if failure := core.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "jobs"); failure != nil {
+		parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
+		if failure := core.unusable(route, response.HTTPResponse, parsed != nil, response.Body, "jobs"); failure != nil {
 			return Page[Job]{}, failure
 		}
 		if !rowsHave(response.Body, "jobs", "id", "state", "created_at") {

@@ -120,14 +120,15 @@ func (b BillingService) Packs(ctx context.Context) ([]Pack, error) {
 	if err != nil {
 		return nil, (&annotator{core: core}).annotate(ctx, core.readFailed(err, route))
 	}
-	if failure := core.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "packs"); failure != nil {
+	parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
+	if failure := core.unusable(route, response.HTTPResponse, parsed != nil, response.Body, "packs"); failure != nil {
 		return nil, failure
 	}
 	if !rowsHave(response.Body, "packs", "id", "seconds", "amount", "currency", "referral_bonus_seconds") {
 		return nil, core.badResponse(route, response.StatusCode())
 	}
-	packs := make([]Pack, len(response.JSON200.Packs))
-	for i, raw := range response.JSON200.Packs {
+	packs := make([]Pack, len(parsed.Packs))
+	for i, raw := range parsed.Packs {
 		packs[i] = Pack{
 			ID: raw.Id, Seconds: raw.Seconds, Minutes: raw.Seconds / secondsPerMinute, Price: newMoney(raw.Amount, raw.Currency),
 			BonusMinutes: raw.ReferralBonusSeconds / secondsPerMinute, Available: raw.Available == nil || *raw.Available,
@@ -142,14 +143,15 @@ func (c *core) savedCards(ctx context.Context) (*Cards, error) {
 	if err != nil {
 		return nil, c.readFailed(err, route)
 	}
-	if failure := c.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "methods"); failure != nil {
+	parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
+	if failure := c.unusable(route, response.HTTPResponse, parsed != nil, response.Body, "methods"); failure != nil {
 		return nil, failure
 	}
 	if !rowsHave(response.Body, "methods", "id", "type", "brand", "last4", "exp_month", "exp_year", "is_default", "fast_checkout_eligible") {
 		return nil, c.badResponse(route, response.StatusCode())
 	}
-	cards := &Cards{DefaultID: valueOf(response.JSON200.DefaultId), Cards: make([]Card, len(response.JSON200.Methods))}
-	for i, raw := range response.JSON200.Methods {
+	cards := &Cards{DefaultID: valueOf(parsed.DefaultId), Cards: make([]Card, len(parsed.Methods))}
+	for i, raw := range parsed.Methods {
 		cards.Cards[i] = Card{
 			ID: raw.Id, Type: raw.Type, Brand: raw.Brand, Last4: raw.Last4, ExpMonth: raw.ExpMonth, ExpYear: raw.ExpYear,
 			Email: valueOf(raw.Email), IsDefault: raw.IsDefault, FastCheckoutEligible: raw.FastCheckoutEligible,
@@ -195,10 +197,11 @@ func (b BillingService) AddCardURL(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", (&annotator{core: core}).annotate(ctx, core.readFailed(err, route))
 	}
-	if failure := core.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "checkout_url"); failure != nil {
+	parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
+	if failure := core.unusable(route, response.HTTPResponse, parsed != nil, response.Body, "checkout_url"); failure != nil {
 		return "", failure
 	}
-	return response.JSON200.CheckoutUrl, nil
+	return parsed.CheckoutUrl, nil
 }
 
 // maxPurchaseKey is the longest idempotency key a purchase takes (spec 7.3).
@@ -283,13 +286,14 @@ func (c *core) purchase(ctx context.Context, body generated.BuyMinutesJSONReques
 	if err != nil {
 		return nil, c.readFailed(err, buyRoute)
 	}
-	if failure := c.unusable(buyRoute, response.HTTPResponse, response.JSON200 != nil, response.Body, "status", "balance_seconds"); failure != nil {
+	parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
+	if failure := c.unusable(buyRoute, response.HTTPResponse, parsed != nil, response.Body, "status", "balance_seconds"); failure != nil {
 		return nil, failure
 	}
-	if response.JSON200.Status != generated.Ok {
+	if parsed.Status != generated.Ok {
 		return nil, c.badResponse(buyRoute, response.StatusCode())
 	}
-	seconds := response.JSON200.BalanceSeconds
+	seconds := parsed.BalanceSeconds
 	return &Purchase{Seconds: seconds, Minutes: seconds / secondsPerMinute}, nil
 }
 
@@ -314,13 +318,14 @@ func (b BillingService) Transactions(ctx context.Context) iter.Seq2[Transaction,
 		if err != nil {
 			return Page[Transaction]{}, core.readFailed(err, route)
 		}
-		if failure := core.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "transactions"); failure != nil {
+		parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
+		if failure := core.unusable(route, response.HTTPResponse, parsed != nil, response.Body, "transactions"); failure != nil {
 			return Page[Transaction]{}, failure
 		}
 		if !rowsHave(response.Body, "transactions", "id", "seconds", "amount_cents", "amount_refunded_cents", "currency", "status", "created_at") {
 			return Page[Transaction]{}, core.badResponse(route, response.StatusCode())
 		}
-		list := response.JSON200
+		list := parsed
 		page := Page[Transaction]{NextCursor: valueOf(list.NextCursor), Items: make([]Transaction, len(list.Transactions))}
 		for i, row := range list.Transactions {
 			page.Items[i] = Transaction{
@@ -351,13 +356,14 @@ func (b BillingService) Ledger(ctx context.Context) iter.Seq2[LedgerEntry, error
 		if err != nil {
 			return Page[LedgerEntry]{}, core.readFailed(err, route)
 		}
-		if failure := core.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "entries"); failure != nil {
+		parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
+		if failure := core.unusable(route, response.HTTPResponse, parsed != nil, response.Body, "entries"); failure != nil {
 			return Page[LedgerEntry]{}, failure
 		}
 		if !rowsHave(response.Body, "entries", "id", "delta_seconds", "kind", "created_at") {
 			return Page[LedgerEntry]{}, core.badResponse(route, response.StatusCode())
 		}
-		list := response.JSON200
+		list := parsed
 		page := Page[LedgerEntry]{NextCursor: valueOf(list.NextCursor), Items: make([]LedgerEntry, len(list.Entries))}
 		for i, row := range list.Entries {
 			page.Items[i] = LedgerEntry{
@@ -385,13 +391,14 @@ func (b BillingService) Holds(ctx context.Context) iter.Seq2[Hold, error] {
 		if err != nil {
 			return Page[Hold]{}, core.readFailed(err, route)
 		}
-		if failure := core.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "holds"); failure != nil {
+		parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
+		if failure := core.unusable(route, response.HTTPResponse, parsed != nil, response.Body, "holds"); failure != nil {
 			return Page[Hold]{}, failure
 		}
 		if !rowsHave(response.Body, "holds", "id", "kind", "seconds", "created_at") {
 			return Page[Hold]{}, core.badResponse(route, response.StatusCode())
 		}
-		list := response.JSON200
+		list := parsed
 		page := Page[Hold]{NextCursor: valueOf(list.NextCursor), Items: make([]Hold, len(list.Holds))}
 		for i, row := range list.Holds {
 			page.Items[i] = Hold{ID: row.Id, Kind: string(row.Kind), Seconds: row.Seconds, CreatedAt: unixTime(int64(row.CreatedAt))}

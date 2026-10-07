@@ -274,9 +274,13 @@ func (d *doer) attempt(parent context.Context, req *http.Request) outcome {
 		return outcome{err: err, sent: !unsent, took: time.Since(started)}
 	}
 	defer func() { _ = resp.Body.Close() }()
-	// net/http keeps the request on the response, and the caller gets the response back.
+	// net/http keeps the request on the response, and the caller gets the response back. The request
+	// is the one the transport (and a user's RoundTripper) may still hold, so its header map is not
+	// ours to change: the response gets a copy without the token.
 	if resp.Request != nil {
-		resp.Request.Header.Del("Authorization")
+		stripped := resp.Request.Clone(ctx)
+		stripped.Header.Del("Authorization")
+		resp.Request = stripped
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, d.limit+1))
 	if err == nil && int64(len(body)) > d.limit {

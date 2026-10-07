@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Hushscript/hushscript-go/generated"
 	"github.com/Hushscript/hushscript-go/internal/probe"
@@ -32,6 +33,22 @@ func formatInt(v int64) string { return strconv.FormatInt(v, 10) }
 
 func invalidOption(red redactor, message string, cause error) *Error {
 	return newSDKError(KindPreflight, "invalid_option", message, cause, red, hintInputs{})
+}
+
+// safeSegment reports whether id can stand as one path segment of a request: "", "." and ".." would
+// collapse into another route (GET /v1/jobs/.. is GET /v1), and bytes that are not UTF-8 have no
+// agreed percent-encoding. Everything else is percent-encoded by the generated client.
+func safeSegment(id string) bool {
+	return id != "" && id != "." && id != ".." && utf8.ValidString(id)
+}
+
+// checkID is the invalid_option error for an id that cannot be a path segment, raised before any
+// request. name is the option as the caller knows it.
+func checkID(red redactor, name, id string) error {
+	if safeSegment(id) {
+		return nil
+	}
+	return invalidOption(red, name+` must be a non-empty id that is not "." or "..", in valid UTF-8.`, nil)
 }
 
 // newIdempotencyKey is a UUID v4 string: 36 characters, valid for uploads (16 to 128 bytes of 0x21 to 0x7E)
@@ -226,23 +243,27 @@ func bodyFrom(opts *TranscribeOptions, size int64, declared int, key string) cre
 
 // createUpload sends POST /v1/uploads. The doer paces it and replays it on a lost answer, because the
 // body carries the idempotency key.
-func (c *core) createUpload(ctx context.Context, body createBody) (*generated.UploadCreateResponse, error) {
+func (c *core) createUpload(ctx context.Context, body createBody) (created *generated.UploadCreateResponse, status int, err error) {
 	const route = "POST /v1/uploads"
 	encoded, err := json.Marshal(body)
 	if err != nil {
-		return nil, c.requestNotBuilt(err)
+		return nil, 0, c.requestNotBuilt(err)
 	}
 	response, err := c.api.CreateUploadWithBodyWithResponse(ctx, "application/json", bytes.NewReader(encoded))
 	if err != nil {
-		return nil, c.readFailed(err, route)
+		return nil, 0, c.readFailed(err, route)
 	}
-	if failure := c.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "job_id", "state"); failure != nil {
-		return nil, failure
+	parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
+	if failure := c.unusable(route, response.HTTPResponse, parsed != nil, response.Body, "job_id", "state"); failure != nil {
+		return nil, 0, failure
 	}
-	if upload := response.JSON200.Upload; upload != nil && !partRowsUsable(upload.PartUrls) {
-		return nil, c.badResponse(route, response.StatusCode())
+	if !safeSegment(parsed.JobId) {
+		return nil, 0, c.badResponse(route, response.StatusCode())
 	}
-	return response.JSON200, nil
+	if upload := parsed.Upload; upload != nil && !partRowsUsable(upload.PartUrls) {
+		return nil, 0, c.badResponse(route, response.StatusCode())
+	}
+	return parsed, response.StatusCode(), nil
 }
 
 func (c *core) transcribe(ctx context.Context, src *fileSource, opts *TranscribeOptions) (result *Transcript, err error) {
@@ -282,7 +303,7 @@ func (c *core) transcribe(ctx context.Context, src *fileSource, opts *Transcribe
 		opts.OnProgress(Progress{Stage: StageUploading, BytesTotal: src.size})
 	}
 	ann.key = key // from here the create may have reached the server
-	created, err := c.createUpload(ctx, bodyFrom(opts, src.size, declared, key))
+	created, status, err := c.createUpload(ctx, bodyFrom(opts, src.size, declared, key))
 	if err != nil {
 		return nil, err
 	}
@@ -292,8 +313,12 @@ func (c *core) transcribe(ctx context.Context, src *fileSource, opts *Transcribe
 	if opts.OnResumeToken != nil {
 		opts.OnResumeToken(token)
 	}
+	plan, failure := c.planOf(created, status)
+	if failure != nil {
+		return nil, failure // after the token is known: the job exists, so the error carries the way back to it
+	}
 	r := &run{core: c, state: state, token: token, src: src, concurrency: concurrency, waitTimeout: waitTimeout, onProgress: opts.OnProgress}
-	return r.finish(ctx, created.State, planOf(created), nil)
+	return r.finish(ctx, created.State, plan, nil)
 }
 
 // preflight is everything the SDK can refuse before a hold is placed (spec 8.1), in the spec's order.
@@ -327,12 +352,13 @@ func (c *core) preflight(ctx context.Context, src *fileSource, opts *TranscribeO
 	if err != nil {
 		return 0, c.readFailed(err, accountRoute)
 	}
-	if failure := c.unusable(accountRoute, account.HTTPResponse, account.JSON200 != nil, account.Body,
+	parsed := decodedBody(account.JSON200, account.HTTPResponse, account.Body)
+	if failure := c.unusable(accountRoute, account.HTTPResponse, parsed != nil, account.Body,
 		"balance_seconds", "limits.used_today_seconds", "limits.max_daily_seconds"); failure != nil {
 		return 0, failure
 	}
 	needed := billableEstimate(declared, opts)
-	balance := account.JSON200.BalanceSeconds
+	balance := parsed.BalanceSeconds
 	if balance < needed {
 		failure := newSDKError(KindInsufficientBalance, "insufficient_balance",
 			"The balance is "+strconv.Itoa(balance)+" s; this file needs about "+strconv.Itoa(needed)+" s.", nil, red,
@@ -340,7 +366,7 @@ func (c *core) preflight(ctx context.Context, src *fileSource, opts *TranscribeO
 		failure.Details = map[string]any{"needed_seconds": float64(needed), "balance_seconds": float64(balance)}
 		return 0, failure
 	}
-	limits := account.JSON200.Limits
+	limits := parsed.Limits
 	if limits.UsedTodaySeconds+declared > limits.MaxDailySeconds {
 		failure := newSDKError(KindDailyLimit, "daily_limit",
 			"This upload would pass the daily limit ("+strconv.Itoa(limits.UsedTodaySeconds)+" of "+strconv.Itoa(limits.MaxDailySeconds)+" s used).", nil, red,

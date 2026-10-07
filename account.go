@@ -80,7 +80,8 @@ func (c *core) readAccount(ctx context.Context, required ...string) (accountBody
 	if err != nil {
 		return accountBody{}, c.readFailed(err, route)
 	}
-	if failure := c.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, required...); failure != nil {
+	parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
+	if failure := c.unusable(route, response.HTTPResponse, parsed != nil, response.Body, required...); failure != nil {
 		return accountBody{}, failure
 	}
 	var body accountBody

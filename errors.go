@@ -166,8 +166,14 @@ func (e *Error) ReceivedToken() string {
 	return e.receivedToken.reveal()
 }
 
-// LogValue is the error as slog logs it: the redacted text of Error, never the struct.
-func (e Error) LogValue() slog.Value { return slog.StringValue(e.Error()) }
+// LogValue is the error as slog logs it: the redacted text of Error, never the struct. It is on the
+// pointer, so a nil *Error (an error variable that holds a typed nil) logs as "<nil>" and does not panic.
+func (e *Error) LogValue() slog.Value {
+	if e == nil {
+		return slog.StringValue("<nil>")
+	}
+	return slog.StringValue(e.Error())
+}
 
 // Unwrap returns the error that caused this one, for errors.Is and errors.As.
 func (e *Error) Unwrap() error { return e.cause }

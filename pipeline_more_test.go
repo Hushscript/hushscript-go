@@ -505,18 +505,39 @@ func TestAnUnusableSuccessBodyIsBadResponseWithTheStatusItCameWith(t *testing.T)
 	}
 }
 
-// A 2xx other than 200 has no decoded body, so the SDK cannot use it however well formed it is; the error
-// carries the status the API really answered with.
-func TestAWellFormedBodyOnANon200SuccessIsBadResponseWithThatStatus(t *testing.T) {
+// Success is any 2xx with a usable body (spec section 7.4, R58): a 201, 202 or 203 is read like a 200,
+// on every call of the pipeline.
+func TestAWellFormedBodyOnAnyTwoXXSucceeds(t *testing.T) {
+	for _, status := range []int{201, 202, 203} {
+		for _, route := range []string{"account", "create", "partUrls", "complete", "job", "transcript"} {
+			t.Run(fmt.Sprintf("%s %d", route, status), func(t *testing.T) {
+				r := newRig(t)
+				r.api.pageSize = 2
+				r.api.set(func(f *fakeAPI) { f.successStatus = map[string]int{route: status} })
+				tr, err := r.transcribe(nil)
+				if err != nil || tr == nil || tr.ID != "tr_1" {
+					t.Fatalf("a %d on %s: %v", status, route, err)
+				}
+				if r.api.count(route) == 0 {
+					t.Fatalf("the rig never called %s", route)
+				}
+			})
+		}
+	}
+}
+
+// A 2xx with a body the SDK cannot use is bad_response with the status the API really answered with,
+// whatever that status is.
+func TestAnUnusableBodyOnANonOKTwoXXIsBadResponseWithThatStatus(t *testing.T) {
 	cases := []struct {
 		name, route, body string
 		created           bool
 	}{
-		{"account", "account", `{"balance_seconds":36000,"held_seconds":0,"limits":{"active_jobs":0,"max_active_jobs":50,"max_daily_seconds":100000,"used_today_seconds":0}}`, false},
-		{"create", "create", `{"job_id":"job_1","state":"uploading"}`, true},
-		{"complete", "complete", `{"ok":true,"state":"queued"}`, true},
-		{"job", "job", `{"id":"job_1","state":"done","transcript_id":"tr_1"}`, true},
-		{"transcript", "transcript", `{"id":"tr_1","title":"T","duration_seconds":20,"created_at":1,"updated_at":2,"body":{"version":1,"original":{"utterances":[]},"translations":{}}}`, true},
+		{"account", "account", `{"balance_seconds":"x"}`, false},
+		{"create", "create", `{"state":"uploading"}`, true},
+		{"complete", "complete", `{"ok":true}`, true},
+		{"job", "job", `{"id":"job_1"}`, true},
+		{"transcript", "transcript", `{"id":"tr_1"}`, true},
 	}
 	for _, status := range []int{201, 202, 204} {
 		for _, tc := range cases {

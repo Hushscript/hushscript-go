@@ -278,16 +278,16 @@ func TestEveryErrorAfterThePurchaseWasSentCarriesTheKeyAndNeverRetriesTwice(t *t
 
 func TestAnUnusablePurchaseAnswerIsBadResponseWithItsStatusAndTheKey(t *testing.T) {
 	for name, answer := range map[string]step{
-		"empty object":       {status: 200, body: `{}`},
-		"no status":          {status: 200, body: `{"balance_seconds":600}`},
-		"status not ok":      {status: 200, body: `{"status":"pending","balance_seconds":600}`},
-		"no balance":         {status: 200, body: `{"status":"ok"}`},
-		"fractional balance": {status: 200, body: `{"status":"ok","balance_seconds":600.5}`},
-		"string balance":     {status: 200, body: `{"status":"ok","balance_seconds":"600"}`},
-		"null balance":       {status: 200, body: `{"status":"ok","balance_seconds":null}`},
-		"truncated":          {status: 200, body: `{"status":"ok","bal`},
-		"201":                {status: 201, body: `{"status":"ok","balance_seconds":600}`},
-		"204":                {status: 204},
+		"empty object":              {status: 200, body: `{}`},
+		"no status":                 {status: 200, body: `{"balance_seconds":600}`},
+		"status not ok":             {status: 200, body: `{"status":"pending","balance_seconds":600}`},
+		"no balance":                {status: 200, body: `{"status":"ok"}`},
+		"fractional balance":        {status: 200, body: `{"status":"ok","balance_seconds":600.5}`},
+		"string balance":            {status: 200, body: `{"status":"ok","balance_seconds":"600"}`},
+		"null balance":              {status: 200, body: `{"status":"ok","balance_seconds":null}`},
+		"truncated":                 {status: 200, body: `{"status":"ok","bal`},
+		"201 without a usable body": {status: 201, body: `{"status":"ok"}`},
+		"204":                       {status: 204},
 	} {
 		t.Run(name, func(t *testing.T) {
 			api := buyServer(t, defaultCard, answer)

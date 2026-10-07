@@ -107,8 +107,14 @@ func (c Client) GoString() string { return c.String() }
 // Format covers every fmt verb, including %d and %x, which would otherwise print the struct fields.
 func (c Client) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, c.String()) }
 
-// LogValue is the client as slog logs it: the same text as String, never the struct.
-func (c Client) LogValue() slog.Value { return slog.StringValue(c.String()) }
+// LogValue is the client as slog logs it: the same text as String, never the struct. It is on the
+// pointer, so a nil *Client logs as "<nil>" and does not panic.
+func (c *Client) LogValue() slog.Value {
+	if c == nil {
+		return slog.StringValue("<nil>")
+	}
+	return slog.StringValue(c.String())
+}
 
 // userAgent is "hushscript-go/<version> go/<go version>" (spec section 3).
 func userAgent() string {
