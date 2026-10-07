@@ -386,19 +386,27 @@ func retryAfterOf(header http.Header, inputs hintInputs) (time.Duration, bool) {
 	if wait, ok := parseRetryAfter(header); ok {
 		return wait, true
 	}
-	if seconds, ok := inputs.retryAfterSeconds.get(); ok {
+	if seconds, ok := inputs.retryAfterSeconds.get(); ok && seconds <= maxWaitSeconds {
 		return time.Duration(seconds * float64(time.Second)), true
 	}
 	return 0, false
 }
+
+// maxWaitSeconds is the longest wait a time.Duration can hold, in whole seconds (about 292 years). A
+// Retry-After beyond it, or beyond what a number can say, counts as absent.
+const maxWaitSeconds = math.MaxInt64 / 1_000_000_000
+
+// maxDetailNumber is the largest number a hint input may be, the last whole number a float64 holds
+// exactly (every SDK's safe-integer bound); a bigger one is treated as absent.
+const maxDetailNumber = 1 << 53
 
 func parseRetryAfter(header http.Header) (time.Duration, bool) {
 	text := strings.TrimSpace(header.Get("Retry-After"))
 	if text == "" {
 		return 0, false
 	}
-	seconds, err := strconv.Atoi(text)
-	if err != nil || seconds < 0 {
+	seconds, err := strconv.ParseInt(text, 10, 64)
+	if err != nil || seconds < 0 || seconds > maxWaitSeconds {
 		return 0, false
 	}
 	return time.Duration(seconds) * time.Second, true
@@ -432,16 +440,16 @@ type hintInputs struct {
 func hintInputsFromDetails(details map[string]any) hintInputs {
 	var in hintInputs
 	read := func(level map[string]any) {
-		number := func(key string, into *maybe[float64]) {
-			if value, ok := asFloat(level[key]); ok && value >= 0 {
+		number := func(key string, limit float64, into *maybe[float64]) {
+			if value, ok := asFloat(level[key]); ok && value >= 0 && value <= limit {
 				*into = some(value)
 			}
 		}
-		number("needed_seconds", &in.neededSeconds)
-		number("balance_seconds", &in.balanceSeconds)
-		number("used_seconds", &in.usedSeconds)
-		number("max_seconds", &in.maxSeconds)
-		number("retry_after_seconds", &in.retryAfterSeconds)
+		number("needed_seconds", maxDetailNumber, &in.neededSeconds)
+		number("balance_seconds", maxDetailNumber, &in.balanceSeconds)
+		number("used_seconds", maxDetailNumber, &in.usedSeconds)
+		number("max_seconds", maxDetailNumber, &in.maxSeconds)
+		number("retry_after_seconds", maxWaitSeconds, &in.retryAfterSeconds)
 		if packs, ok := level["allowed_packs"].([]any); ok {
 			var names []string
 			for _, pack := range packs {
