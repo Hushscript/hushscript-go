@@ -46,6 +46,17 @@ func partURLsOf(rows []generated.PresignedPartUrl) []partURL {
 	return urls
 }
 
+// nullPartURLs reports whether body is an object whose part_urls is a JSON null: the same "direct
+// upload is not available" answer as a null page.
+func nullPartURLs(body []byte) bool {
+	var root map[string]json.RawMessage
+	if json.Unmarshal(body, &root) != nil {
+		return false
+	}
+	value, ok := root["part_urls"]
+	return ok && string(bytes.TrimSpace(value)) == "null"
+}
+
 // partRowsUsable reports whether every part URL row has a positive part number and a URL.
 func partRowsUsable(rows []generated.PresignedPartUrl) bool {
 	for _, row := range rows {
@@ -648,6 +659,12 @@ func (p *partPages) load(ctx context.Context, start int) error {
 	}
 	if bytes.Equal(bytes.TrimSpace(response.Body), []byte("null")) && response.StatusCode() >= http.StatusOK && response.StatusCode() < http.StatusMultipleChoices {
 		// A JSON null page says direct upload is not available for this job: its parts go through the API.
+		p.mu.Lock()
+		p.direct = false
+		p.mu.Unlock()
+		return nil
+	}
+	if nullPartURLs(response.Body) && response.StatusCode() >= http.StatusOK && response.StatusCode() < http.StatusMultipleChoices {
 		p.mu.Lock()
 		p.direct = false
 		p.mu.Unlock()

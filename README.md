@@ -278,6 +278,7 @@ ApiError                         has Status (Kind.IsAPI)
 ├─ ValidationError               400, 422
 └─ RateLimitError                429
 ConfigurationError
+HushscriptError                  unexpected_error, Status 0 (KindUnexpected)
 PreflightError                   no credit was held (Kind.IsPreflight)
 ├─ UnsupportedMediaError
 ├─ FileLimitError
@@ -297,9 +298,12 @@ once the job exists it carries `ResumeToken` too. Pass the token to `client.Resu
 without a second charge.
 
 A failure of the SDK's own after a request was sent, one that fits none of the kinds above, is a
-`KindAPI` error with the code `unexpected_error` and `Status` 0; the original rides along as its
-cause, redacted. `OnProgress` and `OnResumeToken` cannot return an error: a panic in one is yours, and
-leaves the call with the value you raised, never recovered or wrapped.
+`KindUnexpected` error (class name `HushscriptError`) with the code `unexpected_error` and `Status`
+0; the original rides along as its cause, redacted. It is not an API answer, so `Kind.IsAPI` is false
+for it. `OnProgress` and `OnResumeToken` cannot return an error: a panic in one is yours, and leaves
+the call with the value you raised, never recovered or wrapped. `runtime.Goexit` inside a callback is
+unsupported. The SDK does not recover panics from its own internals either; number parsing is fuzzed
+instead, so a malformed answer comes back as an error, not a panic.
 
 ## What the SDK does for you
 

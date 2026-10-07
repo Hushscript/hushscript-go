@@ -263,7 +263,7 @@ func TestKindNamesFollowSpecSection92(t *testing.T) {
 		KindConflict: "ConflictError", KindValidation: "ValidationError", KindRateLimit: "RateLimitError",
 		KindPaymentMethodRequired: "PaymentMethodRequiredError", KindUpload: "UploadError",
 		KindJobFailed: "JobFailedError", KindWaitTimeout: "WaitTimeoutError", KindAbort: "AbortError",
-		KindNetwork: "NetworkError", KindOutcomeUnknown: "OutcomeUnknownError", KindPreflight: "PreflightError",
+		KindNetwork: "NetworkError", KindOutcomeUnknown: "OutcomeUnknownError", KindPreflight: "PreflightError", KindUnexpected: "HushscriptError",
 	}
 	for kind, name := range want {
 		if kind.String() != name {
@@ -276,7 +276,7 @@ func TestKindNamesFollowSpecSection92(t *testing.T) {
 }
 
 // The numeric values of the kinds that existed before KindPreflight stay where they were: KindPreflight
-// is appended, not inserted.
+// and KindUnexpected are appended, not inserted.
 func TestKindValuesDoNotMoveWhenAKindIsAdded(t *testing.T) {
 	released := []ErrorKind{
 		KindAPI, KindConfiguration, KindUnsupportedMedia, KindFileLimit, KindDailyLimit, KindResumeMismatch,
@@ -289,8 +289,8 @@ func TestKindValuesDoNotMoveWhenAKindIsAdded(t *testing.T) {
 			t.Errorf("%v is %d, want %d", kind, int(kind), i)
 		}
 	}
-	if int(KindPreflight) != len(released) {
-		t.Errorf("KindPreflight is %d, want %d", int(KindPreflight), len(released))
+	if int(KindPreflight) != len(released) || int(KindUnexpected) != len(released)+1 {
+		t.Errorf("KindPreflight is %d, KindUnexpected %d, want %d and %d", int(KindPreflight), int(KindUnexpected), len(released), len(released)+1)
 	}
 }
 
@@ -305,7 +305,7 @@ func TestKindFamilies(t *testing.T) {
 			t.Errorf("%v should be API only", kind)
 		}
 	}
-	for _, kind := range []ErrorKind{KindConfiguration, KindNetwork, KindAbort, KindOutcomeUnknown, KindUpload, KindJobFailed, KindWaitTimeout, KindPaymentMethodRequired} {
+	for _, kind := range []ErrorKind{KindConfiguration, KindNetwork, KindAbort, KindOutcomeUnknown, KindUpload, KindJobFailed, KindWaitTimeout, KindPaymentMethodRequired, KindUnexpected} {
 		if kind.IsAPI() || kind.IsPreflight() {
 			t.Errorf("%v belongs to neither family", kind)
 		}
