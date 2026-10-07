@@ -1,7 +1,6 @@
 package hushscript
 
 import (
-	"encoding/json"
 	"io"
 	"time"
 )
@@ -94,34 +93,6 @@ type WaitOptions struct {
 	// WaitTimeout is how long to wait: 0 for the default hour.
 	WaitTimeout time.Duration
 	OnProgress  func(Progress)
-}
-
-// Transcript is a finished transcription as the API returns it. The full model, with the formatters,
-// replaces this type in a later task; Raw stays the API's body byte for byte.
-type Transcript struct {
-	ID              string
-	Title           string
-	Language        string
-	DurationSeconds float64
-	// Raw is the body of GET /v1/transcripts/{id}, unknown fields included.
-	Raw json.RawMessage
-}
-
-// Job is a processing job as the API reports it.
-type Job struct {
-	ID    string
-	State string
-	// TranscriptID is set once the job is done.
-	TranscriptID string
-	// Error is the failure text of a failed job, opaque.
-	Error string
-	// FailureKind is "media_unreadable" or "media_undecodable" when the file itself could not be read.
-	FailureKind string
-}
-
-// JobsService is the friendly layer over the jobs endpoints: Client.Jobs.
-type JobsService struct {
-	core *core
 }
 
 func (c Client) pipeline() (*core, error) {

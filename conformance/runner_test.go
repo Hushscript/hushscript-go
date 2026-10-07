@@ -20,6 +20,7 @@ import (
 
 	hushscript "github.com/Hushscript/hushscript-go"
 	"github.com/Hushscript/hushscript-go/generated"
+	"github.com/Hushscript/hushscript-go/internal/goldens"
 	"github.com/Hushscript/hushscript-go/internal/probe"
 )
 
@@ -62,7 +63,9 @@ type errorExpect struct {
 type env struct {
 	client *hushscript.Client
 	media  func(ctx context.Context, name string) (string, error)
-	token  string
+	// file downloads a file the mock serves, by its path under the conformance checkout.
+	file  func(ctx context.Context, path string) ([]byte, error)
+	token string
 }
 
 // operations maps call.op to what the SDK does. An op that is not here is reported as skipped,
@@ -71,10 +74,11 @@ var operations = map[string]operation{
 	"balance":         {run: balance},
 	"claim":           {run: claim, errorsOnly: true},
 	"rotate":          {run: rotate, errorsOnly: true},
-	"listTranscripts": {run: firstPage, errorsOnly: true},
+	"listTranscripts": {run: listTranscripts},
 	"transcribe":      {run: transcribe},
 	"resume":          {run: resume},
 	"probe":           {run: probeDurations},
+	"format":          {run: formatGoldens, direct: true},
 }
 
 // operation is one mapped call.op. errorsOnly marks a call that goes through the generated client for
@@ -83,6 +87,9 @@ var operations = map[string]operation{
 type operation struct {
 	run        func(context.Context, *env, map[string]any) (map[string]any, error)
 	errorsOnly bool
+	// direct marks a call that needs no virtual time and sends no API request: the driver stays out of
+	// it, so its downloads from the mock cannot look like a stalled SDK.
+	direct bool
 }
 
 var errNotMappedYet = errors.New("the friendly layer for this call does not exist yet")
@@ -104,23 +111,65 @@ func rotate(ctx context.Context, e *env, _ map[string]any) (map[string]any, erro
 	return nil, errNotMappedYet
 }
 
-func firstPage(ctx context.Context, e *env, _ map[string]any) (map[string]any, error) {
-	if _, err := e.client.API().ListTranscriptsWithResponse(ctx, &generated.ListTranscriptsParams{}); err != nil {
-		return nil, err
+// listTranscripts drains Transcripts.List and reports {count, firstId, lastId}.
+func listTranscripts(ctx context.Context, e *env, args map[string]any) (map[string]any, error) {
+	opts := &hushscript.ListOptions{}
+	if size, ok := args["pageSize"].(float64); ok {
+		opts.PageSize = int(size)
 	}
-	return nil, errNotMappedYet
+	count, first, last := 0, "", ""
+	for item, err := range e.client.Transcripts.List(ctx, opts) {
+		if err != nil {
+			return nil, err
+		}
+		if count == 0 {
+			first = item.ID
+		}
+		count++
+		last = item.ID
+	}
+	return map[string]any{"count": float64(count), "firstId": first, "lastId": last}, nil
 }
 
 func balance(ctx context.Context, e *env, _ map[string]any) (map[string]any, error) {
-	response, err := e.client.API().GetAccountWithResponse(ctx)
+	got, err := e.client.Balance(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if response.JSON200 == nil {
-		return nil, fmt.Errorf("GET /v1/account: no JSON body in the %d answer", response.StatusCode())
+	var expires any
+	if got.ExpiresAt != nil {
+		expires = got.ExpiresAt.Format(time.RFC3339Nano)
 	}
-	seconds := response.JSON200.BalanceSeconds
-	return map[string]any{"seconds": float64(seconds), "minutes": float64(seconds / 60)}, nil
+	return map[string]any{
+		"seconds": float64(got.Seconds), "minutes": float64(got.Minutes), "heldSeconds": float64(got.HeldSeconds), "expiresAt": expires,
+	}, nil
+}
+
+// formatGoldens renders every golden from its transcript fixture and reports {checked, mismatches}; a
+// mismatch is the golden's file name. The files come from the mock, and the SDK sends no request.
+func formatGoldens(ctx context.Context, e *env, _ map[string]any) (map[string]any, error) {
+	all := goldens.All()
+	mismatches := []any{}
+	bodies := map[string][]byte{}
+	for _, golden := range all {
+		body, ok := bodies[golden.Transcript]
+		if !ok {
+			var err error
+			if body, err = e.file(ctx, "/__files/fixtures/transcripts/"+golden.Transcript+".json"); err != nil {
+				return nil, err
+			}
+			bodies[golden.Transcript] = body
+		}
+		want, err := e.file(ctx, "/__files/fixtures/exports/"+golden.File)
+		if err != nil {
+			return nil, err
+		}
+		rendered, err := goldens.Render(golden, body)
+		if err != nil || rendered != string(want) {
+			mismatches = append(mismatches, golden.File)
+		}
+	}
+	return map[string]any{"checked": float64(len(all)), "mismatches": mismatches}, nil
 }
 
 // transcribeOptions reads a scenario's camelCase options into the SDK's.
@@ -137,7 +186,7 @@ func transcribeOptions(args map[string]any) *hushscript.TranscribeOptions {
 }
 
 // transcriptResult is the contract's result of a transcribe: {id, title, language, durationSeconds,
-// utteranceCount, text, raw}. The model with toText arrives with the formatters, so text is absent.
+// utteranceCount, text, raw}; text is Text(nil).
 func transcriptResult(t *hushscript.Transcript) (map[string]any, error) {
 	var raw map[string]any
 	if err := json.Unmarshal(t.Raw, &raw); err != nil {
@@ -155,7 +204,7 @@ func transcriptResult(t *hushscript.Transcript) (map[string]any, error) {
 	}
 	return map[string]any{
 		"id": t.ID, "title": t.Title, "language": t.Language, "durationSeconds": t.DurationSeconds,
-		"utteranceCount": float64(len(body.Body.Original.Utterances)), "raw": raw,
+		"utteranceCount": float64(len(body.Body.Original.Utterances)), "text": t.Text(nil), "raw": raw,
 	}, nil
 }
 
@@ -341,7 +390,7 @@ func runScenario(parent context.Context, t *testing.T, mock *mockClient, files *
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &env{client: client, media: files.fetch}
+	e := &env{client: client, media: files.fetch, file: mock.file}
 	drive := &driver{mock: mock, clock: clock, transport: transport}
 
 	if prior := scenario.Call.Prior; prior != nil {
@@ -363,8 +412,10 @@ func runScenario(parent context.Context, t *testing.T, mock *mockClient, files *
 	if err = mock.mark(ctx); err != nil {
 		t.Fatal(err)
 	}
-	got, err := execute(ctx, drive, mapped, e, scenario.Call.Args)
-	if err != nil {
+	var got executed
+	if mapped.direct {
+		got.result, got.err = mapped.run(ctx, e, scenario.Call.Args)
+	} else if got, err = execute(ctx, drive, mapped, e, scenario.Call.Args); err != nil {
 		t.Fatal(err)
 	}
 
