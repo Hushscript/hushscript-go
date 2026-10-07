@@ -429,8 +429,12 @@ func parseRetryAfter(header http.Header) (time.Duration, bool) {
 // it has, is capped to the longest wait, so it still counts as "over 60"; a negative or non-numeric
 // value is absent.
 func retryAfterDetail(raw any) (float64, bool) {
+	// plainJSON turns a number no float64 holds into its digit string, so a string reaches here too.
+	text, isText := raw.(string)
 	if number, isNumber := raw.(json.Number); isNumber {
-		text := number.String()
+		text, isText = number.String(), true
+	}
+	if isText {
 		if text != "" && strings.Trim(text, "0123456789") == "" {
 			if seconds, err := strconv.ParseInt(text, 10, 64); err != nil || seconds > maxWaitSeconds {
 				return maxWaitSeconds, true
