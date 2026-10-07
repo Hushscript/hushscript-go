@@ -137,18 +137,20 @@ pack in the app. A key that met 4021 is dead; a new `Buy` call mints a new one.
 
 A purchase is retried at most once, on a network error, a 502 or a 503, with the same idempotency
 key, so those retries cannot charge you twice. When `Buy` still gives up after the request was sent
-(the connection dropped twice, or the answer was not one the SDK can use), the card may have been
-charged. Every such error carries `IdempotencyKey`; ask again with it and the purchase can never
-happen twice:
+(the connection dropped twice, a 408, a 409, a server error, or an answer the SDK cannot use), the card
+may have been charged. Every such error carries `IdempotencyKey`; ask again with it and the purchase
+can never happen twice:
 
 ```go
 purchase, err := client.Buy(ctx, "300min", &hushscript.BuyOptions{AcknowledgeNoRefund: true})
 var failure *hushscript.Error
 if errors.As(err, &failure) && failure.IdempotencyKey != "" {
-	// A refusal (4xx) charged nothing, so only ask again after a lost or unusable answer.
-	lost := failure.Kind == hushscript.KindNetwork || failure.Kind == hushscript.KindAbort ||
-		failure.Code == "bad_response" || failure.Status >= 500
-	if lost {
+	switch failure.Status {
+	case 400, 401, 402, 403, 404, 422, 429:
+		// Only these refusals charged nothing (4021 and 4023 are 403).
+	default:
+		// Anything else after the send may have charged: a 408, a 409, a 5xx, no status at all
+		// (a lost connection) or an unusable answer. Ask again with the same key.
 		purchase, err = client.Buy(ctx, "300min", &hushscript.BuyOptions{
 			AcknowledgeNoRefund: true,
 			IdempotencyKey:      failure.IdempotencyKey,
@@ -180,7 +182,20 @@ take the same options as `New` (`WithBaseURL`, `WithHTTPClient` and so on) and i
 ```go
 // The server shows each token once, so write every one down the moment it arrives.
 keep := func(token string) error {
-	return os.WriteFile("agent-token", []byte(token+"\n"), 0o600)
+	file, err := os.CreateTemp(".", ".token-*") // created with mode 0600
+	if err != nil {
+		return err
+	}
+	if _, err := file.WriteString(token + "\n"); err != nil {
+		_ = file.Close()
+		_ = os.Remove(file.Name())
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(file.Name())
+		return err
+	}
+	return os.Rename(file.Name(), "agent-token") // an earlier token is replaced, never truncated first
 }
 
 signup, err := hushscript.AgentSignup(ctx, hushscript.AgentSignupRequest{
@@ -215,9 +230,6 @@ if err := keep(next.Token); err != nil {
 }
 ```
 
-`os.WriteFile` applies the mode only when it creates the file, so the example in `examples/agent-signup`
-creates it private, calls `Chmod`, and only then writes.
-
 - `AcceptTerms` is never filled in for you; an empty one is a `KindValidation` error
   (`accept_terms_required`) before any request. A wrong version fails with `policy_version_stale`, and
   the error's `Hint` names the current one.
@@ -227,7 +239,8 @@ creates it private, calls `Chmod`, and only then writes.
   token it replaces, so lose the new one and the account is out of reach. A claim or a rotation whose
   answer is lost, or comes back without a usable token, is a `KindOutcomeUnknown` error and is never
   retried, because a retry could not succeed; its `Hint` says what to check. When the answer did carry
-  a token but not the rest, `Error.ReceivedToken` holds it so it is not lost.
+  a token but not the rest, `Error.ReceivedToken()` returns it so it is not lost; it never appears in a
+  printed or encoded error.
 - `DryRun: true` validates a signup without opening a checkout.
 
 ## Errors
@@ -388,3 +401,11 @@ API document leaves out (`signup_id` on the claim operation), in a private copy 
   Scorecard needs it to publish its results.
 - The `audit` compose service has outbound network access, next to `regen` and `smoke`: `go mod tidy
   -diff` and `govulncheck` ask the module proxy and the vulnerability database.
+
+## Security
+
+See [SECURITY.md](SECURITY.md).
+
+## License
+
+MIT
