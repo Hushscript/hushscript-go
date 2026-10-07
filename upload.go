@@ -30,6 +30,27 @@ type uploadPlan struct {
 	totalParts int
 	urls       []partURL
 	next       int // 0 once every part has a URL
+	// proxiedOnly is a create answer whose part_urls is null: direct upload is not available for the
+	// job, so every part goes through the API (R70), whatever next_part_number says.
+	proxiedOnly bool
+}
+
+// createdUpload is a create answer with what the generated type cannot tell: a null part_urls and an
+// empty one decode alike.
+type createdUpload struct {
+	*generated.UploadCreateResponse
+	noDirect bool
+}
+
+// createdWithoutPartURLs reports whether the create answer's upload has a JSON null part_urls.
+func createdWithoutPartURLs(body []byte) bool {
+	var root struct {
+		Upload json.RawMessage `json:"upload"`
+	}
+	if json.Unmarshal(body, &root) != nil {
+		return false
+	}
+	return nullPartURLs(root.Upload)
 }
 
 // partURL is a presigned part URL, held as a secret because its query is a signature.
@@ -68,20 +89,22 @@ func partRowsUsable(rows []generated.PresignedPartUrl) bool {
 }
 
 // planOf reads the direct-upload plan of a create answer; nil stands for a proxied job. A part size
-// or part count that is not a positive whole number cannot be a plan at all: that is a bad_response
+// above the 32 MiB ceiling (the one the API clamps to, and the most a proxied part may hold), or a part
+// size or part count that is not a positive whole number, cannot be a plan at all: that is a bad_response
 // with the status the API answered with, not a bad_part_plan, which is for a plan that disagrees with
 // itself (the part count is not the file's size over the part size, checked by newUploader).
-func (c *core) planOf(created *generated.UploadCreateResponse, status int) (*uploadPlan, *Error) {
+func (c *core) planOf(created *createdUpload, status int) (*uploadPlan, *Error) {
 	if created.Upload == nil {
 		return nil, nil
 	}
-	if created.Upload.PartSizeBytes < 1 || created.Upload.TotalParts < 1 {
+	if created.Upload.PartSizeBytes < 1 || created.Upload.TotalParts < 1 || int64(created.Upload.PartSizeBytes) > proxiedPartBytes {
 		return nil, c.badResponse("POST /v1/uploads", status)
 	}
 	plan := &uploadPlan{
-		partSize:   int64(created.Upload.PartSizeBytes),
-		totalParts: created.Upload.TotalParts,
-		urls:       partURLsOf(created.Upload.PartUrls),
+		partSize:    int64(created.Upload.PartSizeBytes),
+		totalParts:  created.Upload.TotalParts,
+		urls:        partURLsOf(created.Upload.PartUrls),
+		proxiedOnly: created.noDirect,
 	}
 	if created.Upload.NextPartNumber != nil {
 		plan.next = *created.Upload.NextPartNumber
@@ -589,7 +612,7 @@ type pageFetch struct {
 }
 
 func newPartPages(c *core, job string, plan *uploadPlan) *partPages {
-	p := &partPages{core: c, job: job, inflight: map[int]*pageFetch{}, next: plan.next, direct: true}
+	p := &partPages{core: c, job: job, inflight: map[int]*pageFetch{}, next: plan.next, direct: !plan.proxiedOnly}
 	if len(plan.urls) > 0 {
 		p.store(plan.urls)
 	}

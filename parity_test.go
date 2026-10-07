@@ -54,6 +54,80 @@ func TestAPartPlanWithoutPositiveWholeNumbersIsBadResponseWithTheKeyAndTheResume
 	}
 }
 
+// createPlan answers the rig's create with a plan made of the given part fields and part_urls/next tail.
+func createPlan(fields, tail string) func(*seen) (int, string, bool) {
+	return func(s *seen) (int, string, bool) {
+		if s.route != "create" {
+			return 0, "", false
+		}
+		return 200, `{"job_id":"job_1","state":"uploading","balance_seconds":1,"held_seconds":1,"funding":"personal","limits":{"active_jobs":1,"max_active_jobs":50,"max_daily_seconds":1,"used_today_seconds":0},"upload":{` +
+			fields + `,` + tail + `}}`, true
+	}
+}
+
+// R70, create side: a create answer whose upload has part_urls null means direct upload is not available
+// for the job, exactly like a null part-urls page: every part goes through the API, whatever
+// next_part_number says, and nothing asks for a page.
+func TestACreateAnswerWithNullPartURLsTakesProxiedPartsOnly(t *testing.T) {
+	for name, tail := range map[string]string{
+		"next part null":                 `"part_urls":null,"next_part_number":null`,
+		"next part 1":                    `"part_urls":null,"next_part_number":1`,
+		"whitespace and a far next part": `"part_urls": null ,"next_part_number":17`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			r.api.size = int64(len(r.wav))
+			r.api.setHook(createPlan(`"part_size_bytes":161000,"total_parts":4`, tail))
+			mustTranscribe(t, r, nil)
+			if r.api.count("partUrls") != 0 || r.api.count("r2") != 0 || r.api.count("part") != 4 || r.api.count("complete") != 1 {
+				t.Errorf("part-urls %d, direct %d, proxied %d, complete %d", r.api.count("partUrls"), r.api.count("r2"), r.api.count("part"), r.api.count("complete"))
+			}
+		})
+	}
+}
+
+// The control that tells a null part_urls from an empty one: an empty list is still a direct plan, and
+// with no next part to ask for it ends in part_url_missing, not in a silent proxied upload.
+func TestACreateAnswerWithEmptyPartURLsAndNoNextPartIsNotProxied(t *testing.T) {
+	r := newRig(t)
+	r.api.size = int64(len(r.wav))
+	r.api.setHook(createPlan(`"part_size_bytes":161000,"total_parts":4`, `"part_urls":[],"next_part_number":null`))
+	_, err := r.transcribe(nil)
+	_ = wantCode(t, err, KindUpload, "part_url_missing")
+	if r.api.count("part") != 0 {
+		t.Errorf("%d proxied parts", r.api.count("part"))
+	}
+}
+
+// A part size above the 32 MiB the API clamps to is no plan: the proxied fallback would send parts the
+// API refuses. Exactly 32 MiB is the most a plan may say.
+func TestAPartSizeAboveTheApiMaximumIsBadResponseAndTheMaximumIsAccepted(t *testing.T) {
+	for name, size := range map[string]int{"one byte over": 32<<20 + 1, "a gigabyte": 1 << 30} {
+		for _, tail := range []string{`"part_urls":[],"next_part_number":1`, `"part_urls":null,"next_part_number":null`} {
+			t.Run(fmt.Sprintf("%s %s", name, tail), func(t *testing.T) {
+				r := newRig(t)
+				r.api.setHook(createPlan(fmt.Sprintf(`"part_size_bytes":%d,"total_parts":1`, size), tail))
+				_, err := r.transcribe(nil)
+				e := wantCode(t, err, KindAPI, "bad_response")
+				if e.Status != 200 || e.IdempotencyKey == "" || e.ResumeToken == "" {
+					t.Errorf("status %d, key %q, token %q", e.Status, e.IdempotencyKey, e.ResumeToken)
+				}
+				if r.api.count("r2")+r.api.count("part")+r.api.count("complete") != 0 {
+					t.Error("parts were sent for a plan that is no plan")
+				}
+			})
+		}
+	}
+	r := newRig(t)
+	r.api.size = int64(len(r.wav))
+	r.api.partSize = 32 << 20
+	r.api.setHook(createPlan(`"part_size_bytes":33554432,"total_parts":1`, `"part_urls":null,"next_part_number":null`))
+	mustTranscribe(t, r, nil)
+	if r.api.count("part") != 1 || r.api.count("complete") != 1 {
+		t.Errorf("proxied %d, complete %d", r.api.count("part"), r.api.count("complete"))
+	}
+}
+
 func TestAPartPlanThatIsNotWholeNumbersIsBadResponseWithTheKey(t *testing.T) {
 	for name, fields := range map[string]string{
 		"fractional part size":   `"part_size_bytes":1.5,"total_parts":4`,
@@ -230,7 +304,7 @@ func TestADeeplyNestedBodyIsNonJSONAndNeverPanics(t *testing.T) {
 	})
 }
 
-// R54: net/http replays a request only when it is replayable (an idempotent method, or an Idempotency-Key
+// R54 over HTTP/1.1 only (the server below speaks nothing else; h2_replay_test.go holds the HTTP/2 proof): net/http replays a request only when it is replayable (an idempotent method, or an Idempotency-Key
 // header); the SDK sets no such header, so a non-idempotent request that was sent is never sent twice.
 // The server below answers the first request of each connection and closes the connection after reading
 // the whole of the second one, which is how a keep-alive connection dies after the request was sent.
@@ -322,7 +396,7 @@ func warmUp(t *testing.T, c *Client, s *killServer) {
 	}
 }
 
-func TestANonIdempotentRequestThatWasSentIsNeverReplayedOnAReusedConnectionThatDies(t *testing.T) {
+func TestANonIdempotentRequestThatWasSentIsNeverReplayedOnAReusedConnectionThatDiesOverHTTP1(t *testing.T) {
 	const body = `{"size_bytes":100,"duration_seconds":20}`
 	cases := []struct {
 		name, method, path, body string
@@ -421,6 +495,30 @@ func TestAGetOnAReusedConnectionThatDiesIsReplayedByNetHTTP(t *testing.T) {
 	sent := srv.sent(http.MethodGet, "/v1/account")
 	if len(sent) != 2 || sent[0].seq != 2 || sent[1].seq != 1 {
 		t.Errorf("GET requests = %+v, want the second on the dead connection and a replay on a new one", sent)
+	}
+}
+
+// Pinning only (the label is built from the part number the uploader holds, never parsed from the URL):
+// a real presigned URL names its part in the partNumber query, and its last path segment is the object
+// key, so a log target taken from the last segment would be wrong (spec section 10).
+func TestADirectPartIsLoggedByItsPartNumberNotByTheLastSegmentOfItsURL(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	c := newTestClient(t, "http://127.0.0.1:1", newFakeClock(), WithLogger(logger), WithMaxRetries(0))
+	req, err := http.NewRequestWithContext(withDirectStorage(context.Background(), 7), http.MethodPut,
+		"http://127.0.0.1:1/bucket/jobs-9-object?partNumber=7&uploadId=up_1&X-Amz-Signature=SIG", strings.NewReader("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = send(c, req)
+	out := buf.String()
+	if !strings.Contains(out, "path=r2:part/7") {
+		t.Errorf("the part is not logged by its number:\n%s", out)
+	}
+	for _, leaked := range []string{"jobs-9-object", "bucket", "up_1", "SIG", "partNumber"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("the log shows %q:\n%s", leaked, out)
+		}
 	}
 }
 

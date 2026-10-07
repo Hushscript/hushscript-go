@@ -14,7 +14,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Hushscript/hushscript-go/generated"
 	"github.com/Hushscript/hushscript-go/internal/probe"
 )
 
@@ -254,7 +253,7 @@ func bodyFrom(opts *TranscribeOptions, size int64, declared int, key string) cre
 
 // createUpload sends POST /v1/uploads. The doer paces it and replays it on a lost answer, because the
 // body carries the idempotency key.
-func (c *core) createUpload(ctx context.Context, body createBody) (created *generated.UploadCreateResponse, status int, err error) {
+func (c *core) createUpload(ctx context.Context, body createBody) (created *createdUpload, status int, err error) {
 	const route = "POST /v1/uploads"
 	encoded, err := json.Marshal(body)
 	if err != nil {
@@ -274,7 +273,7 @@ func (c *core) createUpload(ctx context.Context, body createBody) (created *gene
 	if upload := parsed.Upload; upload != nil && !partRowsUsable(upload.PartUrls) {
 		return nil, 0, c.badResponse(route, response.StatusCode())
 	}
-	return parsed, response.StatusCode(), nil
+	return &createdUpload{UploadCreateResponse: parsed, noDirect: createdWithoutPartURLs(response.Body)}, response.StatusCode(), nil
 }
 
 func (c *core) transcribe(ctx context.Context, src *fileSource, opts *TranscribeOptions) (result *Transcript, err error) {
@@ -365,16 +364,7 @@ func (c *core) preflight(ctx context.Context, src *fileSource, opts *TranscribeO
 	}
 	parsed := decodedBody(account.JSON200, account.HTTPResponse, account.Body)
 	if failure := c.unusable(accountRoute, account.HTTPResponse, parsed != nil, account.Body,
-		"balance_seconds", "limits.used_today_seconds", "limits.max_daily_seconds"); failure != nil {
-		return 0, failure
-	}
-	needed := billableEstimate(declared, opts)
-	balance := parsed.BalanceSeconds
-	if balance < needed {
-		failure := newSDKError(KindInsufficientBalance, "insufficient_balance",
-			"The balance is "+strconv.Itoa(balance)+" s; this file needs about "+strconv.Itoa(needed)+" s.", nil, red,
-			hintInputs{neededSeconds: some(float64(needed)), balanceSeconds: some(float64(max(balance, 0)))})
-		failure.Details = map[string]any{"needed_seconds": float64(needed), "balance_seconds": float64(balance)}
+		"limits.used_today_seconds", "limits.max_daily_seconds"); failure != nil {
 		return 0, failure
 	}
 	limits := parsed.Limits
@@ -386,16 +376,6 @@ func (c *core) preflight(ctx context.Context, src *fileSource, opts *TranscribeO
 		return 0, failure
 	}
 	return declared, nil
-}
-
-// billableEstimate is the duration times the multipliers a hold would carry (spec 8.1). Multichannel
-// counts once, because the channel count is unknown before the upload.
-func billableEstimate(seconds int, opts *TranscribeOptions) int {
-	factor := 1.0 + 0.25*float64(len(opts.TranslateTo))
-	if opts.Medical {
-		factor++
-	}
-	return int(math.Ceil(float64(seconds) * factor))
 }
 
 // finish takes a job from the state its create or its read reported to a transcript. known is the job
