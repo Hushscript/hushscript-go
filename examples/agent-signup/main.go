@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	hushscript "github.com/Hushscript/hushscript-go"
@@ -28,8 +29,8 @@ func main() {
 		var failure *hushscript.Error
 		if errors.As(err, &failure) {
 			fmt.Fprintf(os.Stderr, "%s: %s\n", failure.Code, failure.Hint+failure.Message)
-			if failure.ReceivedToken != "" {
-				if keepErr := keep(*tokenFile, failure.ReceivedToken); keepErr == nil {
+			if token := failure.ReceivedToken(); isToken(token) {
+				if keepErr := keep(*tokenFile, token); keepErr == nil {
 					fmt.Fprintf(os.Stderr, "A token that came with the failed answer is in %s.\n", *tokenFile)
 				}
 			}
@@ -41,22 +42,43 @@ func main() {
 	}
 }
 
-// keep writes the token to path with mode 0600: the file is created private, and made private again
-// if it already existed, before any byte of the token is written.
-func keep(path, token string) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // the path is the operator's own argument
-	if err != nil {
-		return err
+// isToken reports whether the text passes the token format check of the SDK, which hushscript.New
+// applies to a token it is given: only such a text may replace what the token file holds.
+func isToken(text string) bool {
+	if text == "" {
+		return false
 	}
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
+	_, err := hushscript.New(hushscript.WithToken(text))
+	return err == nil
+}
+
+// keep writes the token to path with mode 0600. It goes to a private temporary file in the same
+// directory first and replaces path by a rename, so the file never holds less than a whole token and
+// an earlier token is never truncated before the new one is safely on disk.
+func keep(path, token string) error {
+	file, err := os.CreateTemp(filepath.Dir(path), ".token-*") // created with mode 0600
+	if err != nil {
 		return err
 	}
 	if _, err := file.WriteString(token + "\n"); err != nil {
 		_ = file.Close()
+		_ = os.Remove(file.Name())
 		return err
 	}
-	return file.Close()
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(file.Name())
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(file.Name())
+		return err
+	}
+	if err := os.Rename(file.Name(), path); err != nil {
+		_ = os.Remove(file.Name())
+		return err
+	}
+	return nil
 }
 
 func run(terms, tokenFile string) error {

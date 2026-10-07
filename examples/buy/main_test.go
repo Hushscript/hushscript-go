@@ -18,6 +18,10 @@ func TestTheChargedWarningIsShownOnlyWhenThePurchaseMayHaveReachedTheServer(t *t
 		"4021 refusal":      {hushscript.Error{Kind: hushscript.KindAPI, Status: 402, IdempotencyKey: "k"}, false},
 		"429 refusal":       {hushscript.Error{Kind: hushscript.KindRateLimit, Status: 429, IdempotencyKey: "k"}, false},
 		"4xx refusal":       {hushscript.Error{Kind: hushscript.KindAPI, Status: 403, IdempotencyKey: "k"}, false},
+		"408 timeout":       {hushscript.Error{Kind: hushscript.KindAPI, Status: 408, IdempotencyKey: "k"}, true},
+		"409 conflict":      {hushscript.Error{Kind: hushscript.KindConflict, Status: 409, IdempotencyKey: "k"}, true},
+		"4023 refusal":      {hushscript.Error{Kind: hushscript.KindPermissionDenied, Status: 403, NumericCode: 4023, IdempotencyKey: "k"}, false},
+		"no status":         {hushscript.Error{Kind: hushscript.KindAPI, IdempotencyKey: "k"}, true},
 		"before the send":   {hushscript.Error{Kind: hushscript.KindNetwork}, false},
 		"no card to charge": {hushscript.Error{Kind: hushscript.KindPaymentMethodRequired, Code: "no_default_card"}, false},
 	} {
