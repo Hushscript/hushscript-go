@@ -64,6 +64,7 @@ type TranscribeOptions struct {
 	// MatterCode files the transcript under a matter (organization accounts), at most 64 characters.
 	MatterCode string
 	// DurationSeconds overrides the duration probe. It must be finite and positive, and 15 to 36000.
+	// TranscribeStream requires it: a forward-only stream cannot be probed.
 	DurationSeconds float64
 	// IdempotencyKey defaults to a fresh UUID v4 per call. Pass the key an error carried to replay the same job.
 	IdempotencyKey string
@@ -84,13 +85,16 @@ type TranscribeOptions struct {
 }
 
 // ResumeOptions are the options of Resume. The file is needed only while the job is still uploading;
-// give it as Path or as Reader with Size.
+// give it as Path, as Reader with Size, or as Stream; only one of them.
 type ResumeOptions struct {
 	// Path is the original file.
 	Path string
 	// Reader and Size are the original file as a random-access reader of exactly Size bytes.
 	Reader io.ReaderAt
 	Size   int64
+	// Stream is the original file as a forward-only reader, positioned at the start of the file. Its
+	// size is the one the resume token records, so there is no Size to give; it is read in order, once.
+	Stream io.Reader
 	// Concurrency, WaitTimeout and OnProgress are as in TranscribeOptions.
 	Concurrency int
 	WaitTimeout time.Duration

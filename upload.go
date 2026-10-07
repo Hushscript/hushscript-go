@@ -245,6 +245,9 @@ func (c *core) newUploader(r *run, plan *uploadPlan) (*uploader, error) {
 		core: c, red: red, job: r.state.JobID, src: r.src, partSize: partSize, total: total,
 		workers: min(r.concurrency, total), etags: map[int]string{},
 	}
+	if r.src.stream != nil {
+		u.workers = 1 // a forward-only stream is read one part at a time, in order
+	}
 	if plan != nil {
 		u.pages = newPartPages(c, u.job, plan)
 	} else {

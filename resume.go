@@ -63,8 +63,9 @@ func (c *core) jobMissing() *Error {
 
 // Resume picks a transcription up from the token an error carried. It reads the job first. A job past
 // uploading is waited for and fetched without the file; a job still uploading replays its create with
-// the original key (which returns the same job, with no second hold) and needs the file, as Path or as
-// Reader and Size, of the same size as the original. A job that no longer exists is a ResumeMismatch
+// the original key (which returns the same job, with no second hold) and needs the file, as Path, as
+// Reader and Size, or as Stream, of the same size as the original. A Stream is read from where it
+// stands, as the start of the file, and must hold exactly the size the token records. A job that no longer exists is a ResumeMismatch
 // error with code resume_job_missing, and nothing is replayed.
 func (c Client) Resume(ctx context.Context, token string, opts *ResumeOptions) (result *Transcript, err error) {
 	p, err := c.pipeline()
@@ -89,7 +90,7 @@ func (c Client) Resume(ctx context.Context, token string, opts *ResumeOptions) (
 	if err != nil {
 		return nil, err
 	}
-	src, err := resumeSource(opts, red)
+	src, err := resumeSource(opts, state, red)
 	if err != nil {
 		return nil, err
 	}
@@ -165,13 +166,22 @@ func knownSize(src *fileSource, path string) (int64, bool) {
 	return info.Size(), true
 }
 
-// resumeSource is the Reader the caller gave, if any. A Path is not opened here (see Resume).
-func resumeSource(opts *ResumeOptions, red redactor) (*fileSource, error) {
+// resumeSource is the Reader or Stream the caller gave, if any. A Path is not opened here (see Resume).
+// A Stream has the size the token holds.
+func resumeSource(opts *ResumeOptions, state resumeState, red redactor) (*fileSource, error) {
+	given := 0
+	for _, set := range []bool{opts.Path != "", opts.Reader != nil, opts.Stream != nil} {
+		if set {
+			given++
+		}
+	}
 	switch {
-	case opts.Path != "" && opts.Reader != nil:
-		return nil, invalidOption(red, "Give the original file as Path or as Reader, not both.", nil)
+	case given > 1:
+		return nil, invalidOption(red, "Give the original file as Path, as Reader or as Stream, only one of them.", nil)
 	case opts.Path != "":
 		return nil, nil
+	case opts.Stream != nil:
+		return newStreamSource(opts.Stream, state.Size), nil
 	case opts.Reader != nil:
 		if opts.Size <= 0 {
 			return nil, invalidOption(red, "Size must be the file's size in bytes, above 0.", nil)
