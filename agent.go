@@ -195,8 +195,8 @@ func AgentClaim(ctx context.Context, signupID, claimSecret string, opts ...Optio
 	if err != nil {
 		return nil, err
 	}
-	if err := checkID(cfg.redactor(), "The signup id", signupID); err != nil {
-		return nil, err
+	if idErr := checkID(cfg.redactor(), "The signup id", signupID); idErr != nil {
+		return nil, idErr
 	}
 	core, err := newCore(cfg)
 	if err != nil {

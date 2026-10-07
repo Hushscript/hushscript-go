@@ -430,7 +430,7 @@ func TestTheRequestOnTheResponseIsACopyWithoutTheToken(t *testing.T) {
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		sentByTransport = req
 		return &http.Response{
-			StatusCode: 200, Status: "200 OK", Header: http.Header{"Content-Type": {"application/json"}}, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
+			StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": {"application/json"}}, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
 			Body: io.NopCloser(strings.NewReader(`{}`)), Request: req,
 		}, nil
 	})

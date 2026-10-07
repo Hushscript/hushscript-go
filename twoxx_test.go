@@ -90,10 +90,10 @@ func twoXXCalls() []twoXXCall {
 func twoXXServer(t *testing.T, tc twoXXCall, status int, body string) *routeServer {
 	t.Helper()
 	return newRouteServer(t, func(rec recorded, _ int) step {
-		switch {
-		case rec.path == tc.path:
+		switch rec.path {
+		case tc.path:
 			return step{status: status, body: body}
-		case rec.path == "/v1/billing/cards":
+		case "/v1/billing/cards":
 			return step{status: status, body: defaultCard}
 		}
 		return step{status: 404, body: jsonError("not_found", 4040)}

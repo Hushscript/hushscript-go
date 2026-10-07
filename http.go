@@ -278,7 +278,7 @@ func (d *doer) attempt(parent context.Context, req *http.Request) outcome {
 	// is the one the transport (and a user's RoundTripper) may still hold, so its header map is not
 	// ours to change: the response gets a copy without the token.
 	if resp.Request != nil {
-		stripped := resp.Request.Clone(resp.Request.Context())
+		stripped := resp.Request.Clone(ctx)
 		stripped.Header.Del("Authorization")
 		resp.Request = stripped
 	}
