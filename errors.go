@@ -123,10 +123,11 @@ type Error struct {
 	FailureKind string
 	// JobError is the job's own failure text, opaque, on a JobFailed error.
 	JobError string
-	// ReceivedToken is the token string a claim or rotation answer carried when the rest of the answer
-	// could not be used, so the credential the server showed once is not lost. It is never part of
-	// Error(), the message or a formatted error; treat it like any token.
-	ReceivedToken string
+
+	// receivedToken is the token string a claim or rotation answer carried when the rest of the answer
+	// could not be used (read it with ReceivedToken). It is held by pointer so that fmt prints an
+	// address, never the text, at any verb; being unexported keeps it out of json and gob.
+	receivedToken *string
 
 	cause error
 	// causeText is the cause in one redacted line for Error(), set for network failures only.
@@ -155,6 +156,16 @@ func (e *Error) Error() string {
 	return b.String()
 }
 
+// ReceivedToken is the token string a claim or rotation answer carried when the rest of the answer
+// could not be used, so the credential the server showed once is not lost; "" when there is none. It
+// is never part of Error(), the message, a formatted error or its JSON; treat it like any token.
+func (e *Error) ReceivedToken() string {
+	if e == nil || e.receivedToken == nil {
+		return ""
+	}
+	return *e.receivedToken
+}
+
 // Unwrap returns the error that caused this one, for errors.Is and errors.As.
 func (e *Error) Unwrap() error { return e.cause }
 
@@ -162,19 +173,27 @@ func (e *Error) Unwrap() error { return e.cause }
 // caller can read from it is redacted. It has no Unwrap, because one more step down the chain would
 // return the raw error; Is and As look inside it instead, and As hands out only an error whose whole
 // chain is free of the token (a transport that echoes request headers into its errors gets withheld).
+//
+// Its state sits behind one pointer so that fmt, which prints a struct reached through a bad verb
+// (%s, %q, %d of an Error) field by field, shows an address and never the redactor's tokens or the
+// raw cause.
 type redactedCause struct {
+	held *heldCause
+}
+
+type heldCause struct {
 	text string
 	err  error
 	r    redactor
 }
 
 func newRedactedCause(cause error, r redactor) *redactedCause {
-	return &redactedCause{text: r.apply(cause.Error()), err: cause, r: r}
+	return &redactedCause{held: &heldCause{text: r.apply(cause.Error()), err: cause, r: r}}
 }
 
-func (c *redactedCause) Error() string { return c.text }
+func (c *redactedCause) Error() string { return c.held.text }
 
-func (c *redactedCause) Is(target error) bool { return errors.Is(c.err, target) }
+func (c *redactedCause) Is(target error) bool { return errors.Is(c.held.err, target) }
 
 func (c *redactedCause) As(target any) bool {
 	pointer := reflect.ValueOf(target)
@@ -182,7 +201,7 @@ func (c *redactedCause) As(target any) bool {
 		return false
 	}
 	scratch := reflect.New(pointer.Type().Elem())
-	if !errors.As(c.err, scratch.Interface()) {
+	if !errors.As(c.held.err, scratch.Interface()) {
 		return false
 	}
 	if found, ok := scratch.Elem().Interface().(error); ok && !c.clean(found) {
@@ -197,7 +216,7 @@ func (c *redactedCause) clean(err error) bool {
 	if err == nil {
 		return true
 	}
-	if c.r.apply(err.Error()) != err.Error() {
+	if c.held.r.apply(err.Error()) != err.Error() {
 		return false
 	}
 	switch wrapped := err.(type) { //nolint:errorlint // walking the chain by hand is the point

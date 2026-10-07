@@ -586,6 +586,9 @@ func (p *partPages) load(ctx context.Context, start int) error {
 	if failure := p.core.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "part_urls"); failure != nil {
 		return failure
 	}
+	if !rowsHave(response.Body, "part_urls", "n", "url") {
+		return p.core.badResponse(route, response.StatusCode())
+	}
 	if len(response.JSON200.PartUrls) == 0 {
 		p.mu.Lock()
 		p.direct = false

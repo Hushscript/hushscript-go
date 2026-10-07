@@ -22,6 +22,8 @@ jobs:
     outputs:
       archive: ${{ steps.pack.outputs.archive }}
       sha256: ${{ steps.pack.outputs.sha256 }}
+      sbom_sha256: ${{ steps.pack.outputs.sbom_sha256 }}
+      sums_sha256: ${{ steps.pack.outputs.sums_sha256 }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
@@ -31,6 +33,8 @@ jobs:
             github.com:443
             api.github.com:443
             objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            raw.githubusercontent.com:443
             proxy.golang.org:443
             sum.golang.org:443
             storage.googleapis.com:443
@@ -69,8 +73,12 @@ jobs:
           git archive --format=tar.gz --prefix="hushscript-go-${TAG}/" --output="$archive" HEAD
           scripts/sbom.sh "$TAG" > sbom.cdx.json
           sha256sum "$archive" sbom.cdx.json > SHA256SUMS
-          echo "archive=$archive" >> "$GITHUB_OUTPUT"
-          echo "sha256=$(sha256sum "$archive" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          {
+            echo "archive=$archive"
+            echo "sha256=$(sha256sum "$archive" | cut -d' ' -f1)"
+            echo "sbom_sha256=$(sha256sum sbom.cdx.json | cut -d' ' -f1)"
+            echo "sums_sha256=$(sha256sum SHA256SUMS | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
       - name: Keep the archive, the SBOM and the digests
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -82,8 +90,9 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-  # The only job with an OIDC token. It runs no project code: it checks the archive against the digest
-  # the build job computed, attests it and attaches everything to the GitHub release.
+  # The only job with an OIDC token. It runs no project code: it checks the archive, the SBOM and the
+  # digest file against the digests the build job computed, attests the archive and the SBOM, and
+  # attaches everything to the GitHub release.
   attest:
     name: attest and attach to the release
     needs: build
@@ -113,20 +122,29 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-artifacts
-      - name: Verify the archive against the build job's digest
+      - name: Verify the files against the build job's digests
         env:
           ARCHIVE: ${{ needs.build.outputs.archive }}
-          EXPECTED_SHA256: ${{ needs.build.outputs.sha256 }}
+          EXPECTED_ARCHIVE_SHA256: ${{ needs.build.outputs.sha256 }}
+          EXPECTED_SBOM_SHA256: ${{ needs.build.outputs.sbom_sha256 }}
+          EXPECTED_SUMS_SHA256: ${{ needs.build.outputs.sums_sha256 }}
         run: |
-          actual="$(sha256sum "$ARCHIVE" | cut -d' ' -f1)"
-          if [ -z "$EXPECTED_SHA256" ] || [ "$actual" != "$EXPECTED_SHA256" ]; then
-            echo "the archive digest $actual does not match the build job's $EXPECTED_SHA256" >&2
-            exit 1
-          fi
+          verify() {
+            actual="$(sha256sum "$1" | cut -d' ' -f1)"
+            if [ -z "$2" ] || [ "$actual" != "$2" ]; then
+              echo "the digest of $1 is $actual, not the build job's $2" >&2
+              exit 1
+            fi
+          }
+          verify "$ARCHIVE" "$EXPECTED_ARCHIVE_SHA256"
+          verify sbom.cdx.json "$EXPECTED_SBOM_SHA256"
+          verify SHA256SUMS "$EXPECTED_SUMS_SHA256"
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: ${{ needs.build.outputs.archive }}
+          subject-path: |
+            ${{ needs.build.outputs.archive }}
+            sbom.cdx.json
       - name: Attach the archive, the SBOM and the digests to the release
         env:
           GH_TOKEN: ${{ github.token }}

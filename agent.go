@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Hushscript/hushscript-go/generated"
@@ -85,19 +87,40 @@ func (c *core) lostCredential(route string, status int, hint, token string) *Err
 	failure := newSDKError(KindOutcomeUnknown, "outcome_unknown",
 		"The answer to "+route+" could not be used, so the token may be lost.", c.badResponse(route, status), c.cfg.redactor(), hintInputs{})
 	failure.Hint = hint
-	failure.ReceivedToken = token
+	if strings.TrimSpace(token) != "" {
+		failure.receivedToken = &token
+	}
 	return failure
 }
 
 // credentialAnswer is a claim or rotation answer, read strictly: every field the SDK maps must be
 // there with the right type, and a token that passes the token check.
 type credentialAnswer struct {
-	Pat            *string   `json:"pat"`
-	UserID         *string   `json:"user_id"`
-	PatID          *string   `json:"pat_id"`
-	Scopes         *[]string `json:"scopes"`
-	BalanceSeconds *int      `json:"balance_seconds"`
-	ExpiresAt      *int64    `json:"expires_at"`
+	Pat            *string         `json:"pat"`
+	UserID         *string         `json:"user_id"`
+	PatID          *string         `json:"pat_id"`
+	Scopes         *[]string       `json:"scopes"`
+	BalanceSeconds *int            `json:"balance_seconds"`
+	ExpiresAt      json.RawMessage `json:"expires_at"`
+}
+
+// maxUnixSeconds is the newest instant any SDK accepts as a timestamp, the span of a JavaScript Date
+// (the TypeScript SDK's bound), so a value one SDK takes for a date is a date to all of them.
+const maxUnixSeconds = 8_640_000_000_000
+
+// expiry reads expires_at: ok is false for a value that is not an integer number of seconds within
+// the bound; at is nil when the answer carried none (absent or null).
+func (a credentialAnswer) expiry() (at *time.Time, ok bool) {
+	text := strings.TrimSpace(string(a.ExpiresAt))
+	if text == "" || text == "null" {
+		return nil, true
+	}
+	seconds, err := strconv.ParseInt(text, 10, 64)
+	if err != nil || seconds > maxUnixSeconds || seconds < -maxUnixSeconds {
+		return nil, false
+	}
+	found := unixTime(seconds)
+	return &found, true
 }
 
 // readCredential sends a claim or rotation and reads its 2xx answer. It returns the token string
@@ -205,18 +228,20 @@ func (a AgentService) RotateToken(ctx context.Context) (*RotatedToken, error) {
 		return nil, (&annotator{core: core}).annotate(ctx, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	answer, seen, ok := core.readCredential(resp, func(a credentialAnswer) bool { return a.PatID != nil && a.Scopes != nil })
-	if acceptableToken(seen) && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-		// The old token is revoked as soon as the server answered: from here on the client sends the new one.
+	answer, seen, ok := core.readCredential(resp, func(a credentialAnswer) bool {
+		_, usable := a.expiry()
+		return a.PatID != nil && a.Scopes != nil && usable
+	})
+	// The old token is revoked as soon as the server answered: from here on the client sends the new
+	// one. An expiry that cannot be read is the exception, as in the TypeScript SDK: the answer is not
+	// trusted at all, so the old token stays in use and the new one is only kept on the error.
+	if _, usable := answer.expiry(); usable && acceptableToken(seen) && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		core.cfg.tokens.swap(seen)
 	}
 	if !ok {
 		return nil, core.lostCredential(rotateOp, resp.StatusCode, rotateOutcomeHint, seen)
 	}
 	out := &RotatedToken{Token: *answer.Pat, TokenID: *answer.PatID, Scopes: *answer.Scopes}
-	if answer.ExpiresAt != nil {
-		at := unixTime(*answer.ExpiresAt)
-		out.ExpiresAt = &at
-	}
+	out.ExpiresAt, _ = answer.expiry()
 	return out, nil
 }

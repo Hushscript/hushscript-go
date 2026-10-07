@@ -6,6 +6,12 @@ import (
 )
 
 // Money is a price as the API states it, with a display string in the en locale.
+//
+// The amount digits and the grouping rules (minor-unit digits from Stripe's table, thousands grouped
+// with commas) are the same in every Hushscript SDK. The rest of Formatted is this SDK's own: it
+// writes $, €, £ or ¥ for USD, EUR, GBP and JPY, and for every other known currency
+// the code and a no-break space before the number ("KRW 1,234"), where the TypeScript SDK takes its
+// symbols from Intl and may print another. Compare Amount and Currency, never Formatted, across SDKs.
 type Money struct {
 	// Amount is in the currency's minor units, from the API.
 	Amount int

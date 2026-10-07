@@ -7,7 +7,8 @@ import (
 
 const nbsp = " "
 
-// The table is the TypeScript SDK's money test: the two SDKs print the same price for the same answer.
+// The amounts and the digits of the table are the TypeScript SDK's money test; the symbol and the
+// spacing around the number are this SDK's own (ruling R48), and every row here pins them.
 func TestMoneyIsFormattedFromStripesMinorUnitDigitsNeverFromLocaleData(t *testing.T) {
 	for _, tc := range []struct {
 		amount   int
@@ -44,8 +45,12 @@ func TestMoneyIsFormattedFromStripesMinorUnitDigitsNeverFromLocaleData(t *testin
 
 func TestEveryZeroAndThreeDigitCurrencyOfTheStripeTableHasItsDigits(t *testing.T) {
 	for _, code := range []string{"BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA", "PYG", "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF"} {
-		if got := newMoney(1234, code).Formatted; got != code+nbsp+"1,234" && got != "¥1,234" {
-			t.Errorf("%s: %q has digits after the point or is not grouped", code, got)
+		want := code + nbsp + "1,234"
+		if code == "JPY" {
+			want = "¥1,234"
+		}
+		if got := newMoney(1234, code).Formatted; got != want {
+			t.Errorf("%s: %q, want %q (no digits after the point, grouped)", code, got, want)
 		}
 	}
 	for _, code := range []string{"BHD", "JOD", "KWD", "OMR", "TND"} {
