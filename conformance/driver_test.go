@@ -3,8 +3,10 @@ package conformance
 import (
 	"context"
 	"errors"
+	"io"
 	"math"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -27,11 +29,40 @@ type countingTransport struct {
 func (t *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.inFlight.Add(1)
 	t.activity.Add(1)
-	defer func() {
-		t.inFlight.Add(-1)
-		t.activity.Add(1)
-	}()
-	return t.inner.RoundTrip(req)
+	resp, err := t.inner.RoundTrip(req)
+	if err != nil {
+		t.leave()
+		return nil, err
+	}
+	resp.Body = &countedBody{ReadCloser: resp.Body, leave: t.leave}
+	return resp, nil
+}
+
+func (t *countingTransport) leave() {
+	t.inFlight.Add(-1)
+	t.activity.Add(1)
+}
+
+// countedBody keeps a request in flight until the SDK has read the body to its end or closed it: the
+// body is read after the headers arrive, and a stalled read must not look like a quiet SDK.
+type countedBody struct {
+	io.ReadCloser
+	leave func()
+	once  sync.Once
+}
+
+func (b *countedBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		b.once.Do(b.leave)
+	}
+	return n, err
+}
+
+func (b *countedBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.leave)
+	return err
 }
 
 // driver moves the mock clock and the SDK's virtual clock while a call is pending.
