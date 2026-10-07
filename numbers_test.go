@@ -22,16 +22,30 @@ var hugeNumbers = map[string]string{
 	"min int64":       "-9223372036854775808",
 }
 
-func TestARetryAfterNoDurationCanHoldIsAbsent(t *testing.T) {
+// R71: a Retry-After integer past 60, however large, is "over 60": reported capped, never overflowed.
+// Only a value that is not a non-negative integer is absent.
+func TestARetryAfterNoDurationCanHoldIsCappedNotAbsent(t *testing.T) {
+	const longest = maxWaitSeconds * time.Second
 	for name, text := range hugeNumbers {
+		header := http.Header{"Retry-After": []string{text}}
+		wait, ok := parseRetryAfter(header)
+		if strings.Trim(text, "0123456789") != "" {
+			if ok {
+				t.Errorf("%s: Retry-After %.20s read as %v", name, text, wait)
+			}
+			continue
+		}
 		t.Run(name, func(t *testing.T) {
-			header := http.Header{"Retry-After": []string{text}}
-			if wait, ok := parseRetryAfter(header); ok {
-				t.Fatalf("Retry-After %.20s read as %v", text, wait)
+			if !ok || wait != longest {
+				t.Fatalf("Retry-After %.20s read as %v, %v", text, wait, ok)
 			}
 			e := fromResponse(429, header, jsonError("rate_limited", 5000), http.MethodGet, "/v1/account")
-			if e.RetryAfter != 0 || e.Kind != KindRateLimit || strings.Contains(e.Hint, "try again in") {
-				t.Errorf("Retry-After %.20s: retryAfter %v, kind %s, hint %q", text, e.RetryAfter, e.Kind, e.Hint)
+			if e.RetryAfter != longest || e.Kind != KindRateLimit {
+				t.Errorf("Retry-After %.20s: retryAfter %v, kind %s", text, e.RetryAfter, e.Kind)
+			}
+			d := &doer{}
+			if retry, _ := d.statusRetry(classSafe, &retryState{}, e, header, 3); retry {
+				t.Errorf("Retry-After %.20s was retried", text)
 			}
 		})
 	}
@@ -54,8 +68,10 @@ func TestADetailNumberOutOfRangeIsAbsent(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			body := `{"error":"rate_limited","code":5000,"retry_after_seconds":` + text + `,"details":{"retry_after_seconds":` + text + `}}`
 			e := fromResponse(429, nil, body, http.MethodGet, "/v1/account")
-			if e.RetryAfter != 0 || e.Kind != KindRateLimit || e.Hint != "Too many requests." {
-				t.Errorf("retry_after_seconds %.20s: retryAfter %v, kind %s, hint %q", text, e.RetryAfter, e.Kind, e.Hint)
+			// A finite number past what a Duration holds is capped; one no float holds is absent.
+			capped := text != "1e400"
+			if capped != (e.RetryAfter == maxWaitSeconds*time.Second) || (!capped && e.RetryAfter != 0) || e.Kind != KindRateLimit {
+				t.Errorf("retry_after_seconds %.20s: retryAfter %v, kind %s", text, e.RetryAfter, e.Kind)
 			}
 			// Past 2^53 a hint number is absent; the numeric code is any int the platform has.
 			body = `{"error":"insufficient_balance","code":3001,"needed_seconds":` + text + `,"balance_seconds":` + text + `}`
@@ -117,7 +133,7 @@ func TestAFailureThatIsNotAnSDKErrorAfterTheSendIsUnexpectedError(t *testing.T) 
 	cause := errors.New("decoder broke while holding " + testToken)
 	got := (&annotator{core: c, key: "k-123456789012345", token: "resume-token"}).annotate(context.Background(), cause)
 	e := asError(t, got)
-	if e.Code != "unexpected_error" || e.Kind != KindAPI || e.Status != 0 || e.IdempotencyKey != "k-123456789012345" || e.ResumeToken != "resume-token" {
+	if e.Code != "unexpected_error" || e.Kind != KindUnexpected || e.Status != 0 || e.IdempotencyKey != "k-123456789012345" || e.ResumeToken != "resume-token" {
 		t.Fatalf("error = %+v", e)
 	}
 	if !errors.Is(e, cause) {

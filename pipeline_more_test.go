@@ -613,7 +613,6 @@ func TestAPartURLsAnswerWithoutUsableRowsIsBadResponseAndStoresNothing(t *testin
 	for name, body := range map[string]string{
 		"empty object":         `{}`,
 		"array":                `[]`,
-		"part_urls null":       `{"part_urls":null}`,
 		"empty row":            `{"part_urls":[{}]}`,
 		"null row":             `{"part_urls":[null]}`,
 		"row without url":      `{"part_urls":[{"n":1}]}`,
@@ -650,7 +649,7 @@ func TestAPartURLsAnswerWithoutUsableRowsIsBadResponseAndStoresNothing(t *testin
 // A JSON null page is the API saying direct upload is not available for the job: the parts go through
 // the API, as they do for an empty list.
 func TestANullPartURLsPageMeansTheJobTakesProxiedPartsOnly(t *testing.T) {
-	for name, body := range map[string]string{"null": `null`, "null with whitespace": " \n null \n", "empty list": `{"part_urls":[]}`} {
+	for name, body := range map[string]string{"null": `null`, "null with whitespace": " \n null \n", "empty list": `{"part_urls":[]}`, "part_urls null": `{"part_urls":null}`} {
 		t.Run(name, func(t *testing.T) {
 			srv := newRouteServer(t, func(recorded, int) step { return ok(body) })
 			pages := newPartPages(srv.client(t).core, "j1", &uploadPlan{next: 1})

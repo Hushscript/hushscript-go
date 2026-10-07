@@ -41,8 +41,11 @@ const (
 	KindAbort
 	KindNetwork
 	KindOutcomeUnknown
-	// KindPreflight is last so that the values of the kinds released before it do not move.
+	// KindPreflight is appended so that the values of the kinds released before it do not move.
 	KindPreflight
+	// KindUnexpected is a failure of the SDK's own after a request was sent that fits no other kind
+	// (code unexpected_error, Status 0). It is not an API answer: IsAPI is false for it.
+	KindUnexpected
 )
 
 var kindNames = map[ErrorKind]string{
@@ -67,6 +70,7 @@ var kindNames = map[ErrorKind]string{
 	KindAbort:                 "AbortError",
 	KindNetwork:               "NetworkError",
 	KindOutcomeUnknown:        "OutcomeUnknownError",
+	KindUnexpected:            "HushscriptError",
 }
 
 // String returns the class name used by every Hushscript SDK, for example "RateLimitError".
@@ -84,7 +88,8 @@ func (k ErrorKind) IsPreflight() bool {
 	return k == KindPreflight || (k >= KindUnsupportedMedia && k <= KindResumeMismatch)
 }
 
-// IsAPI reports whether the kind is an answer from the API: ApiError and its subclasses.
+// IsAPI reports whether the kind is an answer from the API: ApiError and its subclasses. KindUnexpected
+// is not: it is a failure of the SDK's own and carries no status.
 func (k ErrorKind) IsAPI() bool {
 	return k == KindAPI || (k >= KindAuthentication && k <= KindRateLimit)
 }
@@ -393,7 +398,7 @@ func retryAfterOf(header http.Header, inputs hintInputs) (time.Duration, bool) {
 }
 
 // maxWaitSeconds is the longest wait a time.Duration can hold, in whole seconds (about 292 years). A
-// Retry-After beyond it, or beyond what a number can say, counts as absent.
+// Retry-After beyond it is reported as this many seconds.
 const maxWaitSeconds = math.MaxInt64 / 1_000_000_000
 
 // maxDetailNumber is the largest number a hint input may be, the last whole number a float64 holds
@@ -405,11 +410,35 @@ func parseRetryAfter(header http.Header) (time.Duration, bool) {
 	if text == "" {
 		return 0, false
 	}
-	seconds, err := strconv.ParseInt(text, 10, 64)
-	if err != nil || seconds < 0 || seconds > maxWaitSeconds {
+	digits := strings.TrimPrefix(text, "+")
+	if digits == "" || strings.Trim(digits, "0123456789") != "" {
 		return 0, false
 	}
+	seconds, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil || seconds > maxWaitSeconds {
+		// An integer too large for a Duration is still "over 60": capped, never overflowed.
+		return time.Duration(maxWaitSeconds) * time.Second, true
+	}
 	return time.Duration(seconds) * time.Second, true
+}
+
+// retryAfterDetail reads retry_after_seconds: a number past what a Duration holds, however many digits
+// it has, is capped to the longest wait, so it still counts as "over 60"; a negative or non-numeric
+// value is absent.
+func retryAfterDetail(raw any) (float64, bool) {
+	if number, isNumber := raw.(json.Number); isNumber {
+		text := number.String()
+		if text != "" && strings.Trim(text, "0123456789") == "" {
+			if seconds, err := strconv.ParseInt(text, 10, 64); err != nil || seconds > maxWaitSeconds {
+				return maxWaitSeconds, true
+			}
+		}
+	}
+	value, ok := asFloat(raw)
+	if !ok || value < 0 || math.IsNaN(value) {
+		return 0, false
+	}
+	return math.Min(value, maxWaitSeconds), true
 }
 
 // maybe is a value that may be absent. Zero is a legitimate value ("retry after 0 s"), so presence
@@ -449,7 +478,9 @@ func hintInputsFromDetails(details map[string]any) hintInputs {
 		number("balance_seconds", maxDetailNumber, &in.balanceSeconds)
 		number("used_seconds", maxDetailNumber, &in.usedSeconds)
 		number("max_seconds", maxDetailNumber, &in.maxSeconds)
-		number("retry_after_seconds", maxWaitSeconds, &in.retryAfterSeconds)
+		if value, ok := retryAfterDetail(level["retry_after_seconds"]); ok {
+			in.retryAfterSeconds = some(value)
+		}
 		if packs, ok := level["allowed_packs"].([]any); ok {
 			var names []string
 			for _, pack := range packs {

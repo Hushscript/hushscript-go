@@ -165,10 +165,10 @@ func (c *core) requestNotBuilt(cause error) *Error {
 }
 
 // unexpectedError is the error for a failure of the SDK's own after a request was sent that fits no
-// other class (spec 9.2). It has no kind of its own in Go: it is the base ApiError kind with no status.
-// The original rides along as a redacted cause.
+// other class (spec 9.2). Its kind is KindUnexpected, the base class, with no status. The original
+// rides along as a redacted cause.
 func (c *core) unexpectedError(cause error) *Error {
-	return newSDKError(KindAPI, "unexpected_error", "The SDK failed unexpectedly after the request was sent.", cause, c.cfg.redactor(), hintInputs{})
+	return newSDKError(KindUnexpected, "unexpected_error", "The SDK failed unexpectedly after the request was sent.", cause, c.cfg.redactor(), hintInputs{})
 }
 
 // Transcribe uploads the file at path, waits for it to be transcribed and returns the transcript. The
