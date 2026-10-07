@@ -516,7 +516,7 @@ func TestAWellFormedBodyOnANon200SuccessIsBadResponseWithThatStatus(t *testing.T
 		{"create", "create", `{"job_id":"job_1","state":"uploading"}`, true},
 		{"complete", "complete", `{"ok":true,"state":"queued"}`, true},
 		{"job", "job", `{"id":"job_1","state":"done","transcript_id":"tr_1"}`, true},
-		{"transcript", "transcript", `{"id":"tr_1","title":"T","duration_seconds":20,"body":{"version":1,"original":{"utterances":[]},"translations":{}}}`, true},
+		{"transcript", "transcript", `{"id":"tr_1","title":"T","duration_seconds":20,"created_at":1,"updated_at":2,"body":{"version":1,"original":{"utterances":[]},"translations":{}}}`, true},
 	}
 	for _, status := range []int{201, 202, 204} {
 		for _, tc := range cases {

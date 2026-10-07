@@ -117,6 +117,9 @@ func (c *core) transcriptPage(ctx context.Context, cursor string, size int) (Pag
 	if failure := c.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "transcripts"); failure != nil {
 		return Page[TranscriptSummary]{}, failure
 	}
+	if !rowsHave(response.Body, "transcripts", "id", "created_at") {
+		return Page[TranscriptSummary]{}, c.badResponse(route, response.StatusCode())
+	}
 	list := response.JSON200
 	page := Page[TranscriptSummary]{NextCursor: valueOf(list.NextCursor), Items: make([]TranscriptSummary, len(list.Transcripts))}
 	for i := range list.Transcripts {
@@ -167,6 +170,9 @@ func (t TranscriptsService) Deleted(ctx context.Context) iter.Seq2[DeletedTransc
 		}
 		if failure := core.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "deleted"); failure != nil {
 			return Page[DeletedTranscript]{}, failure
+		}
+		if !rowsHave(response.Body, "deleted", "id", "created_at", "deleted_at") {
+			return Page[DeletedTranscript]{}, core.badResponse(route, response.StatusCode())
 		}
 		var body struct {
 			Deleted []struct {

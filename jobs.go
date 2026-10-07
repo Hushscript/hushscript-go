@@ -10,7 +10,8 @@ import (
 )
 
 // JobOptions is what a job was submitted with, from the API's content-free summary: it says whether
-// keyterms and a prompt were set, never what they were.
+// keyterms and a prompt were set, never what they were. The fields are typed, so a key the API adds to
+// options later is not kept here; Client.API returns the whole body.
 type JobOptions struct {
 	// LanguageCode is the forced language; "" when the language was auto-detected.
 	LanguageCode       string
@@ -148,6 +149,9 @@ func (j JobsService) List(ctx context.Context, opts *JobListOptions) iter.Seq2[J
 		}
 		if failure := core.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "jobs"); failure != nil {
 			return Page[Job]{}, failure
+		}
+		if !rowsHave(response.Body, "jobs", "id", "state", "created_at") {
+			return Page[Job]{}, core.badResponse(route, response.StatusCode())
 		}
 		var body struct {
 			Jobs       []jobBody `json:"jobs"`

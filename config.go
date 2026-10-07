@@ -20,12 +20,14 @@ const (
 	missingTokenMessage = "No Hushscript token: set HUSHSCRIPT_TOKEN or pass a token."
 	// missingTokenHint is the one configuration hint (spec section 3); other configuration errors have none.
 	missingTokenHint = "Set HUSHSCRIPT_TOKEN or pass a token. Create one in the Hushscript app: " +
-		"Account → Connected apps (app.hushscript.com/account/mcp)."
+		"Account → MCP (app.hushscript.com/account/mcp)."
 )
 
 // config is the resolved configuration of a Client.
 type config struct {
-	token      secret
+	token secret
+	// tokens is the live token: Authorization is read from it per attempt, so a rotation applies at once.
+	tokens     *tokenBox
 	baseURL    string
 	baseHost   string
 	baseScheme string
@@ -52,7 +54,12 @@ func (c config) GoString() string { return c.String() }
 // Format covers every fmt verb, including %d and %x, which would otherwise print the struct fields.
 func (c config) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, c.String()) }
 
-func (c config) redactor() redactor { return redactor{token: c.token.reveal()} }
+func (c config) redactor() redactor {
+	if c.tokens != nil {
+		return c.tokens.redactor()
+	}
+	return redactor{token: c.token.reveal()}
+}
 
 // Option configures New.
 type Option func(*config) error
@@ -197,27 +204,38 @@ func validToken(token string) bool {
 }
 
 // resolve applies the options, then the environment, then the defaults, and validates the result.
-func resolve(opts []Option) (config, error) {
+func resolve(opts []Option) (config, error) { return resolveConfig(opts, true) }
+
+// resolveTokenless is resolve for the calls that need no token (agent signup and claim): a token from
+// an option or the environment is ignored, and no request carries Authorization.
+func resolveTokenless(opts []Option) (config, error) { return resolveConfig(opts, false) }
+
+func resolveConfig(opts []Option, withToken bool) (config, error) {
 	var c config
 	for _, opt := range opts {
 		if err := opt(&c); err != nil {
 			return config{}, err
 		}
 	}
-	if c.token == "" {
-		c.token = secret(os.Getenv("HUSHSCRIPT_TOKEN"))
+	if withToken {
+		if c.token == "" {
+			c.token = secret(os.Getenv("HUSHSCRIPT_TOKEN"))
+		}
+		if c.token == "" {
+			failure := newConfigError(missingTokenMessage)
+			failure.Hint = missingTokenHint
+			return config{}, failure
+		}
+		if !validToken(c.token.reveal()) {
+			return config{}, newConfigError("The token contains characters a Hushscript token never has (printable ASCII only).")
+		}
+		if !strings.HasPrefix(c.token.reveal(), tokenPrefix) {
+			return config{}, newConfigError("This doesn't look like a Hushscript token.")
+		}
+	} else {
+		c.token = ""
 	}
-	if c.token == "" {
-		failure := newConfigError(missingTokenMessage)
-		failure.Hint = missingTokenHint
-		return config{}, failure
-	}
-	if !validToken(c.token.reveal()) {
-		return config{}, newConfigError("The token contains characters a Hushscript token never has (printable ASCII only).")
-	}
-	if !strings.HasPrefix(c.token.reveal(), tokenPrefix) {
-		return config{}, newConfigError("This doesn't look like a Hushscript token.")
-	}
+	c.tokens = newTokenBox(c.token.reveal())
 	if c.baseURL == "" {
 		base := os.Getenv("HUSHSCRIPT_BASE_URL")
 		if base == "" {

@@ -49,9 +49,24 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+          path: sdk
+      - name: Read the pinned conformance ref
+        id: conformance
+        run: echo "ref=$(tr -d '[:space:]' < sdk/conformance-ref)" >> "$GITHUB_OUTPUT"
+      - name: Check out the conformance suite at the pinned ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: Hushscript/hushscript-sdk-conformance
+          ref: ${{ steps.conformance.outputs.ref }}
+          path: conformance
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - name: Run just ci
+        working-directory: sdk
         env:
           GO_VERSION: ${{ matrix.go }}
+          CONFORMANCE_CONTEXT: ../conformance
+          CONFORMANCE_DIR: ../conformance
+          CONFORMANCE_STRICT: "1"
         run: just ci "$GO_VERSION"

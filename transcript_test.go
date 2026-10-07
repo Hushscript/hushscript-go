@@ -29,7 +29,7 @@ func one(speaker string, start, end int, text string) string {
 func list(items ...string) string { return "[" + strings.Join(items, ",") + "]" }
 
 func TestATranscriptKeepsEveryFieldOfTheBodyAndTheBodyItself(t *testing.T) {
-	raw := `{"id":"tr_1","title":"Standup","language_detected":null,"duration_seconds":61.5,"speaker_names":{"A":"  Ann  ","B":"   "},"tags":null,` +
+	raw := `{"id":"tr_1","title":"Standup","language_detected":null,"duration_seconds":61,"speaker_names":{"A":"  Ann  ","B":"   "},"tags":null,` +
 		`"created_at":1760000000,"updated_at":1760000100,"auto_delete_at":1770000000,"edited":true,"x_unknown":{"k":[1,2]},` +
 		`"body":{"version":1,"original":{"utterances":[{"speaker":"A","start_ms":0,"end_ms":900,"text":"hi"},{"speaker":"B","start_ms":900,"end_ms":1800,"text":"yo"},{"speaker":"","start_ms":1800,"end_ms":2000,"text":"x"}]},` +
 		`"translations":{"fr":{"utterances":[{"speaker":"A","start_ms":0,"end_ms":900,"text":"salut"}]},"cleaned":{"utterances":[{"speaker":"A","start_ms":0,"end_ms":900,"text":"Hi."}]},"de":{"utterances":[]}}}}`
@@ -37,7 +37,7 @@ func TestATranscriptKeepsEveryFieldOfTheBodyAndTheBodyItself(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &tr); err != nil {
 		t.Fatal(err)
 	}
-	if tr.ID != "tr_1" || tr.Title != "Standup" || tr.Language != "" || tr.DurationSeconds != 61.5 || !tr.Edited {
+	if tr.ID != "tr_1" || tr.Title != "Standup" || tr.Language != "" || tr.DurationSeconds != 61 || !tr.Edited {
 		t.Errorf("scalars: %+v", tr)
 	}
 	if tr.CreatedAt.Unix() != 1760000000 || tr.CreatedAt.Location().String() != "UTC" || tr.UpdatedAt.Unix() != 1760000100 {
@@ -250,7 +250,7 @@ func TestTextMergesTimestampsAndKeepsWhitespaceAsItCame(t *testing.T) {
 
 func TestFormattersUseTheRequestedLanguageAndFallBackToTheOriginal(t *testing.T) {
 	var tr Transcript
-	raw := `{"id":"x","speaker_names":{"A":"Ann"},"body":{"original":{"utterances":[{"speaker":"A","start_ms":0,"end_ms":1000,"text":"hello"}]},` +
+	raw := `{"id":"x","created_at":1,"speaker_names":{"A":"Ann"},"body":{"original":{"utterances":[{"speaker":"A","start_ms":0,"end_ms":1000,"text":"hello"}]},` +
 		`"translations":{"es":{"utterances":[{"speaker":"A","start_ms":0,"end_ms":1000,"text":"hola"}]}}}}`
 	if err := json.Unmarshal([]byte(raw), &tr); err != nil {
 		t.Fatal(err)

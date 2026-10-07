@@ -5,7 +5,7 @@
 set -euo pipefail
 
 repo="https://github.com/Hushscript/hushscript-sdk-conformance.git"
-ref="v0.1.0" # keep in step with compose.yaml and internal/gen ConformanceRef
+ref="$(tr -d '[:space:]' < "$(dirname "$0")/../conformance-ref")" # the one place the ref is pinned
 
 if [ -n "${CONFORMANCE_DIR:-}" ]; then
   dir="$CONFORMANCE_DIR"

@@ -7,3 +7,5 @@ rules:
     ignore:
       # A release must never be cancelled half way: a second push waits its turn instead.
       - release.yml
+      # A publish run must finish: cancelling it halfway can leave a release without its attestation.
+      - publish.yml

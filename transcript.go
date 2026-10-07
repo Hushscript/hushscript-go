@@ -31,7 +31,7 @@ type Transcript struct {
 	Title string
 	// Language is the detected language; "" when there is none.
 	Language        string
-	DurationSeconds float64
+	DurationSeconds int
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	// AutoDeleteAt is when the transcript is scheduled to be purged; nil keeps it indefinitely.
@@ -63,7 +63,7 @@ type transcriptBody struct {
 	ID               string            `json:"id"`
 	Title            string            `json:"title"`
 	LanguageDetected *string           `json:"language_detected"`
-	DurationSeconds  float64           `json:"duration_seconds"`
+	DurationSeconds  int               `json:"duration_seconds"`
 	SpeakerNames     map[string]string `json:"speaker_names"`
 	Tags             []string          `json:"tags"`
 	CreatedAt        *int64            `json:"created_at"`
@@ -79,7 +79,7 @@ type transcriptBody struct {
 }
 
 // transcriptRequired is what a transcript body must hold for the formatters to mean anything.
-var transcriptRequired = []string{"id", "body.original.utterances"}
+var transcriptRequired = []string{"id", "created_at", "body.original.utterances"}
 
 // UnmarshalJSON builds a Transcript from the body of GET /v1/transcripts/{id}.
 func (t *Transcript) UnmarshalJSON(data []byte) error {
@@ -98,9 +98,9 @@ func (t Transcript) MarshalJSON() ([]byte, error) {
 		return t.Raw, nil
 	}
 	return json.Marshal(struct {
-		ID              string  `json:"id"`
-		Title           string  `json:"title"`
-		DurationSeconds float64 `json:"duration_seconds"`
+		ID              string `json:"id"`
+		Title           string `json:"title"`
+		DurationSeconds int    `json:"duration_seconds"`
 	}{t.ID, t.Title, t.DurationSeconds})
 }
 
@@ -108,7 +108,7 @@ func unixTime(seconds int64) time.Time { return time.Unix(seconds, 0).UTC() }
 
 func parseTranscript(data []byte) (*Transcript, error) {
 	if !hasFields(data, transcriptRequired) {
-		return nil, errors.New("hushscript: a transcript needs an id and body.original.utterances")
+		return nil, errors.New("hushscript: a transcript needs an id, created_at and body.original.utterances")
 	}
 	var body transcriptBody
 	if err := json.Unmarshal(data, &body); err != nil {

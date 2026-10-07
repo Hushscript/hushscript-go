@@ -12,6 +12,10 @@ const (
 	defaultWaitTimeout = time.Hour
 )
 
+// Bool returns a pointer to v, for the options that tell "not set" from false with a *bool:
+// Speakers, AutoInsights, Captions and Merge. hushscript.Bool(false) turns one off.
+func Bool(v bool) *bool { return &v }
+
 // ProgressStage says what a Progress report is about.
 type ProgressStage string
 

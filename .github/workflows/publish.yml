@@ -1,0 +1,136 @@
+name: publish
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+concurrency:
+  group: publish-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  # Builds the source archive and the SBOM with read-only permissions and no OIDC token: nothing that
+  # runs here can mint an attestation.
+  build:
+    name: build the source archive
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      archive: ${{ steps.pack.outputs.archive }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            objects.githubusercontent.com:443
+            proxy.golang.org:443
+            sum.golang.org:443
+            storage.googleapis.com:443
+            *.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+      - name: Check the tag against the release manifest and main
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="$(jq -r '."."' .release-please-manifest.json)"
+          if [ "$TAG" != "v$version" ]; then
+            echo "release tag $TAG does not match the manifest version v$version" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "the commit tagged $TAG is not on main" >&2
+            exit 1
+          fi
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Write the source archive, the SBOM and the archive's digest
+        id: pack
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          archive="hushscript-go-${TAG}.tar.gz"
+          git archive --format=tar.gz --prefix="hushscript-go-${TAG}/" --output="$archive" HEAD
+          scripts/sbom.sh "$TAG" > sbom.cdx.json
+          sha256sum "$archive" sbom.cdx.json > SHA256SUMS
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$archive" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Keep the archive, the SBOM and the digests
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-artifacts
+          path: |
+            ${{ steps.pack.outputs.archive }}
+            sbom.cdx.json
+            SHA256SUMS
+          retention-days: 90
+          if-no-files-found: error
+
+  # The only job with an OIDC token. It runs no project code: it checks the archive against the digest
+  # the build job computed, attests it and attaches everything to the GitHub release.
+  attest:
+    name: attest and attach to the release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: write # attach the assets to the release
+      id-token: write # keyless signing of the build attestation
+      attestations: write # attest-build-provenance
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            uploads.github.com:443
+            objects.githubusercontent.com:443
+            fulcio.sigstore.dev:443
+            rekor.sigstore.dev:443
+            tuf-repo-cdn.sigstore.dev:443
+            *.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443
+      - name: Download the build's files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-artifacts
+      - name: Verify the archive against the build job's digest
+        env:
+          ARCHIVE: ${{ needs.build.outputs.archive }}
+          EXPECTED_SHA256: ${{ needs.build.outputs.sha256 }}
+        run: |
+          actual="$(sha256sum "$ARCHIVE" | cut -d' ' -f1)"
+          if [ -z "$EXPECTED_SHA256" ] || [ "$actual" != "$EXPECTED_SHA256" ]; then
+            echo "the archive digest $actual does not match the build job's $EXPECTED_SHA256" >&2
+            exit 1
+          fi
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ needs.build.outputs.archive }}
+      - name: Attach the archive, the SBOM and the digests to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+          ARCHIVE: ${{ needs.build.outputs.archive }}
+        run: gh release upload "$TAG" "$ARCHIVE" sbom.cdx.json SHA256SUMS --clobber
