@@ -1,7 +1,10 @@
 package hushscript
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -341,8 +344,8 @@ func TestATokenInAnUnusableRotationAnswerIsKeptOnTheErrorAndSent(t *testing.T) {
 			c := srv.client(t)
 			_, err := c.Agent.RotateToken(context.Background())
 			e := wantCode(t, err, KindOutcomeUnknown, "outcome_unknown")
-			if e.ReceivedToken != newTokenText || e.Hint != rotateHint {
-				t.Errorf("ReceivedToken %q, hint %q", e.ReceivedToken, e.Hint)
+			if e.ReceivedToken() != newTokenText || e.Hint != rotateHint {
+				t.Errorf("ReceivedToken %q, hint %q", e.ReceivedToken(), e.Hint)
 			}
 			for _, shown := range []string{e.Error(), fmt.Sprintf("%v", e), fmt.Sprintf("%+v", e), e.Message} {
 				if strings.Contains(shown, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") {
@@ -373,8 +376,8 @@ func TestAClaimWithATokenButNoUserOrScopesKeepsTheTokenOnTheError(t *testing.T) 
 		if e.Hint != claimHint || len(srv.to(claimRoute)) != 1 || strings.Contains(e.Error(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") {
 			t.Errorf("%s: hint %q, %d requests, text %q", name, e.Hint, len(srv.to(claimRoute)), e.Error())
 		}
-		if name != "bad token format" && e.ReceivedToken != newTokenText {
-			t.Errorf("%s: ReceivedToken %q", name, e.ReceivedToken)
+		if name != "bad token format" && e.ReceivedToken() != newTokenText {
+			t.Errorf("%s: ReceivedToken %q", name, e.ReceivedToken())
 		}
 	}
 }
@@ -454,4 +457,124 @@ func TestConcurrentRequestsAndARotationShareOneTokenWithoutARace(t *testing.T) {
 		t.Error(err)
 	}
 	wg.Wait()
+}
+
+// ReceivedToken is a method, and the token sits behind a pointer in an unexported field: no fmt verb
+// shows the text of it, on the error or on a copy of it, and neither does json or gob.
+func TestAReceivedTokenIsShownByNoFormatVerbAndNoEncoder(t *testing.T) {
+	answers := map[string]func(t *testing.T) *Error{
+		"claim": func(t *testing.T) *Error {
+			srv := newRouteServer(t, func(recorded, int) step { return ok(`{"pat":"` + newTokenText + `"}`) })
+			_, err := AgentClaim(context.Background(), "sg_1", "cs", tokenless(srv)...)
+			return wantCode(t, err, KindOutcomeUnknown, "outcome_unknown")
+		},
+		"rotate": func(t *testing.T) *Error {
+			srv := newRouteServer(t, func(recorded, int) step { return ok(`{"pat":"` + newTokenText + `","scopes":[]}`) })
+			_, err := srv.client(t).Agent.RotateToken(context.Background())
+			return wantCode(t, err, KindOutcomeUnknown, "outcome_unknown")
+		},
+	}
+	for name, raise := range answers {
+		t.Run(name, func(t *testing.T) {
+			e := raise(t)
+			if e.ReceivedToken() != newTokenText {
+				t.Fatalf("ReceivedToken() = %q", e.ReceivedToken())
+			}
+			var shown []string
+			for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%d", "%x", "%X", "%T", "%p", "%10v", "%-20s"} {
+				shown = append(shown, verb+" of the pointer: "+fmt.Sprintf(verb, e), verb+" of the value: "+fmt.Sprintf(verb, *e))
+			}
+			shown = append(shown, fmt.Sprint(e), fmt.Sprint(*e), fmt.Sprintln(e, *e), fmt.Sprint([]*Error{e}), fmt.Sprintf("%+v", map[string]Error{"k": *e}))
+			for _, value := range []any{e, *e} {
+				encoded, err := json.Marshal(value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				shown = append(shown, string(encoded))
+				var buffer bytes.Buffer
+				_ = gob.NewEncoder(&buffer).Encode(value) // an encoding error is fine: nothing may leak either way
+				shown = append(shown, buffer.String())
+			}
+			for _, text := range shown {
+				for _, secret := range []string{newTokenText, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", hex.EncodeToString([]byte(newTokenText)), strings.ToUpper(hex.EncodeToString([]byte(newTokenText)))} {
+					if strings.Contains(text, secret) {
+						t.Errorf("the token is shown by %q", text)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestARotationWhoseExpiryCannotBeReadKeepsTheOldTokenAndTheNewOneOnTheError(t *testing.T) {
+	for name, expires := range map[string]string{
+		"a string":            `"soon"`,
+		"a fraction":          `1.5`,
+		"a boolean":           `true`,
+		"an object":           `{}`,
+		"beyond the bound":    `8640000000001`,
+		"before the bound":    `-8640000000001`,
+		"far beyond a date":   `1000000000000000`,
+		"too large for int64": `99999999999999999999`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newRouteServer(t, func(rec recorded, _ int) step {
+				if rec.path == "/v1/agent/credentials/rotate" {
+					return rotateAnswer(expires)
+				}
+				return ok(`{"balance_seconds":600,"held_seconds":0,"limits":{}}`)
+			})
+			c := srv.client(t)
+			result, err := c.Agent.RotateToken(context.Background())
+			e := wantCode(t, err, KindOutcomeUnknown, "outcome_unknown")
+			if result != nil || e.ReceivedToken() != newTokenText || e.Hint != rotateHint {
+				t.Errorf("result %+v, ReceivedToken %q, hint %q", result, e.ReceivedToken(), e.Hint)
+			}
+			if _, err := c.Balance(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if got := srv.to("GET /v1/account")[0].header.Get("Authorization"); got != "Bearer "+testToken {
+				t.Errorf("the old token was swapped out: %q", got)
+			}
+		})
+	}
+}
+
+func TestARotationExpiryAtTheBoundOrAbsentIsAccepted(t *testing.T) {
+	for name, tc := range map[string]struct {
+		expires string
+		want    *time.Time
+	}{
+		"at the bound": {`8640000000000`, ptr(time.Unix(8_640_000_000_000, 0).UTC())},
+		"zero":         {`0`, ptr(time.Unix(0, 0).UTC())},
+		"null":         {`null`, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newRouteServer(t, func(recorded, int) step { return rotateAnswer(tc.expires) })
+			got, err := srv.client(t).Agent.RotateToken(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (got.ExpiresAt == nil) != (tc.want == nil) || got.ExpiresAt != nil && !got.ExpiresAt.Equal(*tc.want) {
+				t.Errorf("ExpiresAt = %v, want %v", got.ExpiresAt, tc.want)
+			}
+		})
+	}
+}
+
+func ptr[T any](value T) *T { return &value }
+
+func TestAnAnswerWhoseTokenIsOnlyWhitespaceLeavesNoReceivedToken(t *testing.T) {
+	for _, pat := range []string{``, `  `, ` \n\t `} {
+		body := `{"pat":"` + pat + `","pat_id":"p","scopes":[],"user_id":"u","balance_seconds":0}`
+		srv := newRouteServer(t, func(recorded, int) step { return ok(body) })
+		_, err := AgentClaim(context.Background(), "sg_1", "cs", tokenless(srv)...)
+		if e := wantCode(t, err, KindOutcomeUnknown, "outcome_unknown"); e.ReceivedToken() != "" {
+			t.Errorf("claim, pat %q: ReceivedToken %q", pat, e.ReceivedToken())
+		}
+		_, err = srv.client(t).Agent.RotateToken(context.Background())
+		if e := wantCode(t, err, KindOutcomeUnknown, "outcome_unknown"); e.ReceivedToken() != "" {
+			t.Errorf("rotate, pat %q: ReceivedToken %q", pat, e.ReceivedToken())
+		}
+	}
 }
