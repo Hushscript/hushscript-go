@@ -619,7 +619,9 @@ func TestAReplayThatReturnsAnotherJobStopsWithoutFurtherRequests(t *testing.T) {
 		}
 		return 0, "", false
 	})
-	_, _ = r.client.TranscribeReader(cancelled, bytes.NewReader(r.wav), int64(len(r.wav)), &TranscribeOptions{OnResumeToken: func(s string) { token = s }})
+	// One worker: with several, a part request cancelled on the client can still be on its way to the
+	// server when the call returns, and it would be counted as a request the replay made.
+	_, _ = r.client.TranscribeReader(cancelled, bytes.NewReader(r.wav), int64(len(r.wav)), &TranscribeOptions{Concurrency: 1, OnResumeToken: func(s string) { token = s }})
 	r.api.setHook(func(s *seen) (int, string, bool) {
 		if s.route == "create" {
 			return 200, `{"job_id":"job_other","state":"uploading","balance_seconds":1,"held_seconds":1,"funding":"personal","limits":{"active_jobs":1,"max_active_jobs":50,"max_daily_seconds":1,"used_today_seconds":0},"upload":null}`, true

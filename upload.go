@@ -403,7 +403,9 @@ func isTerminal(failure *Error) bool {
 // recover decides what a failed direct attempt (the PUT, or the part-urls fetch behind it when
 // target is "") leads to. A 403, or any failure once a direct PUT has succeeded, gets one fresh URL
 // page; after that the job falls back to proxied parts if no direct PUT ever succeeded, and raises
-// parts_exhausted if one did. It returns nil when the part should be tried again.
+// parts_exhausted if one did. A part that lost the swap to a direct success was owed that fresh page
+// as well, so it gets it before parts_exhausted. recover returns nil when the part should be tried
+// again.
 func (u *uploader) recover(ctx context.Context, err error, n int, target string, state *directState) error {
 	failure, ok := err.(*Error) //nolint:errorlint // the doer and the pipeline return their own errors unwrapped
 	if !ok || failure.Kind == KindAbort || (failure.Kind == KindUpload && failure.Code == "part_url_missing") || ctx.Err() != nil {
@@ -415,21 +417,46 @@ func (u *uploader) recover(ctx context.Context, err error, n int, target string,
 	}
 	cause := failure
 	if target != "" && !state.refetched && (failure.Status == http.StatusForbidden || u.isDirect()) {
-		state.refetched = true
-		refreshErr := u.pages.refresh(ctx, n, target)
-		if refreshErr == nil {
+		retry, refreshCause, fatal := u.refetch(ctx, n, target, state)
+		if fatal != nil {
+			return fatal
+		}
+		if retry {
 			return nil
 		}
-		refresh, isError := refreshErr.(*Error) //nolint:errorlint // as above
-		if !isError || refresh.Kind == KindAbort || ctx.Err() != nil || (u.isDirect() && isTerminal(refresh)) {
-			return refreshErr
-		}
-		cause = refresh
+		cause = refreshCause
 	}
 	if u.fallBack(n) {
 		return nil
 	}
+	// The swap was lost to a direct success that came after the check above.
+	if target != "" && !state.refetched {
+		retry, refreshCause, fatal := u.refetch(ctx, n, target, state)
+		if fatal != nil {
+			return fatal
+		}
+		if retry {
+			return nil
+		}
+		cause = refreshCause
+	}
 	return newSDKError(KindUpload, "parts_exhausted", "Part "+strconv.Itoa(n)+" failed after retries and a fresh URL.", cause, u.red, hintInputs{})
+}
+
+// refetch takes the one fresh URL page a failed direct PUT is owed. It reports retry when the part
+// should be sent again, and a non-nil fatal when the fetch failed for a reason that ends the upload;
+// otherwise cause is the fetch's own failure, for the error that follows.
+func (u *uploader) refetch(ctx context.Context, n int, target string, state *directState) (retry bool, cause *Error, fatal error) {
+	state.refetched = true
+	refreshErr := u.pages.refresh(ctx, n, target)
+	if refreshErr == nil {
+		return true, nil, nil
+	}
+	refresh, isError := refreshErr.(*Error) //nolint:errorlint // the pipeline returns its own errors unwrapped
+	if !isError || refresh.Kind == KindAbort || ctx.Err() != nil || (u.isDirect() && isTerminal(refresh)) {
+		return false, nil, refreshErr
+	}
+	return false, refresh, nil
 }
 
 func (u *uploader) putDirect(ctx context.Context, n int, target string, data []byte, hold *bodyHold) (string, error) {
