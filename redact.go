@@ -37,9 +37,14 @@ func (r redactor) apply(text string) string {
 			continue
 		}
 		text = strings.ReplaceAll(text, token, redactedToken)
-		// An API that echoes only the secret half is just as much a leak.
-		if _, tail, found := strings.Cut(token, "pat."); found && len(tail) >= minSecretTail {
-			text = strings.ReplaceAll(text, tail, redactedToken)
+		// An API that echoes only what follows "pat." (the id and the secret), or only the secret
+		// segment after the last dot, is just as much a leak.
+		if _, tail, found := strings.Cut(token, "pat."); found {
+			for _, part := range []string{tail, tail[strings.LastIndex(tail, ".")+1:]} {
+				if len(part) >= minSecretTail {
+					text = strings.ReplaceAll(text, part, redactedToken)
+				}
+			}
 		}
 	}
 	text = tokenPattern.ReplaceAllString(text, redactedToken)
