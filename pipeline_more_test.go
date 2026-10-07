@@ -584,3 +584,41 @@ func TestHasFieldsNeedsEveryDottedPathPresentAndNotNull(t *testing.T) {
 		}
 	}
 }
+
+// A 2xx part-urls answer is read at the call site: an object without part_urls, or with a row that has
+// no n or no url, is a bad_response. Nothing is stored from it, so no part is ever sent to a made-up URL.
+func TestAPartURLsAnswerWithoutUsableRowsIsBadResponseAndStoresNothing(t *testing.T) {
+	const route = "GET /v1/uploads/j1/part-urls"
+	for name, body := range map[string]string{
+		"empty object":         `{}`,
+		"null":                 `null`,
+		"array":                `[]`,
+		"part_urls null":       `{"part_urls":null}`,
+		"empty row":            `{"part_urls":[{}]}`,
+		"null row":             `{"part_urls":[null]}`,
+		"row without url":      `{"part_urls":[{"n":1}]}`,
+		"row without n":        `{"part_urls":[{"url":"https://r2.example/1"}]}`,
+		"later row incomplete": `{"part_urls":[{"n":1,"url":"https://r2.example/1"},{"n":2}]}`,
+		"url null":             `{"part_urls":[{"n":1,"url":null}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newRouteServer(t, func(recorded, int) step { return ok(body) })
+			c := srv.client(t)
+			pages := newPartPages(c.core, "j1", &uploadPlan{next: 1})
+			e := wantCode(t, pages.load(context.Background(), 1), KindAPI, "bad_response")
+			if e.Status != http.StatusOK || len(srv.to(route)) != 1 {
+				t.Errorf("status %d after %d requests", e.Status, len(srv.to(route)))
+			}
+			if len(pages.pages) != 0 || !pages.direct {
+				t.Errorf("stored %d pages, direct %v", len(pages.pages), pages.direct)
+			}
+		})
+	}
+	srv := newRouteServer(t, func(recorded, int) step {
+		return ok(`{"part_urls":[{"n":1,"url":"https://r2.example/1"},{"n":2,"url":"https://r2.example/2"}],"next_part_number":null}`)
+	})
+	pages := newPartPages(srv.client(t).core, "j1", &uploadPlan{next: 1})
+	if err := pages.load(context.Background(), 1); err != nil || len(pages.pages) != 1 {
+		t.Errorf("a complete answer: %v, %d pages", err, len(pages.pages))
+	}
+}
