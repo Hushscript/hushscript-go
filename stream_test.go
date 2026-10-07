@@ -55,6 +55,28 @@ func TestAStreamThatReturnsShortReadsIsNotTakenForEnded(t *testing.T) {
 	}
 }
 
+func TestAStreamPartRefusedByR2FallsBackToProxiedWithTheSameBytes(t *testing.T) {
+	r := newRig(t)
+	r.api.setHook(func(s *seen) (int, string, bool) {
+		if s.route == "r2" {
+			return 403, `<Error><Code>AccessDenied</Code></Error>`, true
+		}
+		return 0, "", false
+	})
+	got, err := r.transcribeStream(bytes.NewReader(r.wav), int64(len(r.wav)), &TranscribeOptions{DurationSeconds: 20})
+	if err != nil || got.ID != "tr_1" {
+		t.Fatalf("TranscribeStream = %v, %v", got, err)
+	}
+	if r.api.count("r2") < 2 || r.api.count("partUrls") < 1 || r.api.count("part") != 4 {
+		t.Fatalf("r2 %d, part-urls %d, proxied %d", r.api.count("r2"), r.api.count("partUrls"), r.api.count("part"))
+	}
+	for n, hash := range partHashes(r.wav, testPartSize) {
+		if r.api.parts[n].hash != hash {
+			t.Errorf("part %d holds other bytes than the stream's", n)
+		}
+	}
+}
+
 func TestAStreamOfAnotherSizeThanDeclaredIsAStreamSizeMismatchBeforeComplete(t *testing.T) {
 	for name, declared := range map[string]int64{"fewer": 640_044 + 100_000, "more": 640_044 - 100_000} {
 		t.Run(name, func(t *testing.T) {
@@ -159,7 +181,7 @@ func stalledUpload(t *testing.T, r *rig) string {
 	t.Helper()
 	var token string
 	r.api.jobStates = []string{"uploading", "uploading", "processing", "done"}
-	cancelled, cancel := context.WithCancel(context.Background())
+	canceled, cancel := context.WithCancel(context.Background())
 	r.api.setHook(func(s *seen) (int, string, bool) {
 		if s.route == "r2" || s.route == "part" {
 			cancel()
@@ -167,7 +189,7 @@ func stalledUpload(t *testing.T, r *rig) string {
 		}
 		return 0, "", false
 	})
-	_, err := r.client.TranscribeStream(cancelled, oneWay{bytes.NewReader(r.wav)}, int64(len(r.wav)), &TranscribeOptions{
+	_, err := r.client.TranscribeStream(canceled, oneWay{bytes.NewReader(r.wav)}, int64(len(r.wav)), &TranscribeOptions{
 		DurationSeconds: 20, OnResumeToken: func(s string) { token = s },
 	})
 	_ = wantCode(t, err, KindAbort, "aborted")
@@ -195,9 +217,9 @@ func TestResumeTakesAForwardOnlyStreamWithTheSizeFromTheToken(t *testing.T) {
 
 func TestResumeRefusesAForwardOnlyStreamOfAnotherSizeOrNotAtTheStart(t *testing.T) {
 	cases := map[string]func(wav []byte) io.Reader{
-		"longer":     func(wav []byte) io.Reader { return bytes.NewReader(append(bytes.Clone(wav), 1)) },
-		"shorter":    func(wav []byte) io.Reader { return bytes.NewReader(wav[:len(wav)-1]) },
-		"mid-stream": func(wav []byte) io.Reader { return bytes.NewReader(wav[1000:]) },
+		"longer":                       func(wav []byte) io.Reader { return bytes.NewReader(append(bytes.Clone(wav), 1)) },
+		"shorter":                      func(wav []byte) io.Reader { return bytes.NewReader(wav[:len(wav)-1]) },
+		"without-its-first-1000-bytes": func(wav []byte) io.Reader { return bytes.NewReader(wav[1000:]) },
 	}
 	for name, stream := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -238,6 +260,8 @@ func TestResumeTakesOnlyOneOfPathReaderAndStream(t *testing.T) {
 	_, err := r.client.Resume(context.Background(), token, &ResumeOptions{Reader: bytes.NewReader(r.wav), Size: int64(len(r.wav)), Stream: bytes.NewReader(r.wav)})
 	_ = wantCode(t, err, KindPreflight, "invalid_option")
 	_, err = r.client.Resume(context.Background(), token, &ResumeOptions{Path: "x.wav", Stream: bytes.NewReader(r.wav)})
+	_ = wantCode(t, err, KindPreflight, "invalid_option")
+	_, err = r.client.Resume(context.Background(), token, &ResumeOptions{Stream: bytes.NewReader(r.wav), Size: int64(len(r.wav))})
 	_ = wantCode(t, err, KindPreflight, "invalid_option")
 	if r.api.total() != before {
 		t.Errorf("%d requests were sent", r.api.total()-before)

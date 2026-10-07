@@ -65,8 +65,9 @@ func (c *core) jobMissing() *Error {
 // uploading is waited for and fetched without the file; a job still uploading replays its create with
 // the original key (which returns the same job, with no second hold) and needs the file, as Path, as
 // Reader and Size, or as Stream, of the same size as the original. A Stream is read from where it
-// stands, as the start of the file, and must hold exactly the size the token records. A job that no longer exists is a ResumeMismatch
-// error with code resume_job_missing, and nothing is replayed.
+// stands, as the start of the file, and must hold exactly the size the token records; Size is not
+// given with it. A job that no longer exists is a ResumeMismatch error with code resume_job_missing,
+// and nothing is replayed.
 func (c Client) Resume(ctx context.Context, token string, opts *ResumeOptions) (result *Transcript, err error) {
 	p, err := c.pipeline()
 	if err != nil {
@@ -181,6 +182,9 @@ func resumeSource(opts *ResumeOptions, state resumeState, red redactor) (*fileSo
 	case opts.Path != "":
 		return nil, nil
 	case opts.Stream != nil:
+		if opts.Size != 0 {
+			return nil, invalidOption(red, "Size is not given with Stream: the size is the one in the resume token.", nil)
+		}
 		return newStreamSource(opts.Stream, state.Size), nil
 	case opts.Reader != nil:
 		if opts.Size <= 0 {

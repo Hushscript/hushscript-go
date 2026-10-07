@@ -210,7 +210,7 @@ func (c Client) TranscribeReader(ctx context.Context, r io.ReaderAt, size int64,
 // network body. The SDK cannot seek it or probe it, so opts.DurationSeconds is required, and the size
 // must be exact: a reader that holds more or fewer bytes is an UploadError with code
 // stream_size_mismatch, before the upload is completed. Parts are read one at a time, in order, with
-// at most one part in memory. Cancelling ctx is noticed between reads; close the reader to interrupt a
+// at most one part in memory. Canceling ctx is noticed between parts; close the reader to interrupt a
 // read that is blocked. The SDK never closes r.
 func (c Client) TranscribeStream(ctx context.Context, r io.Reader, size int64, opts *TranscribeOptions) (*Transcript, error) {
 	p, err := c.pipeline()
