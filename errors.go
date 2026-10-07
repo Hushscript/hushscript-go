@@ -123,10 +123,10 @@ type Error struct {
 	FailureKind string
 	// JobError is the job's own failure text, opaque, on a JobFailed error.
 	JobError string
-	// UnusableToken is the token string a claim or rotation answer carried when the rest of the answer
+	// ReceivedToken is the token string a claim or rotation answer carried when the rest of the answer
 	// could not be used, so the credential the server showed once is not lost. It is never part of
 	// Error(), the message or a formatted error; treat it like any token.
-	UnusableToken string
+	ReceivedToken string
 
 	cause error
 	// causeText is the cause in one redacted line for Error(), set for network failures only.

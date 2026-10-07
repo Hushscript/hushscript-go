@@ -341,8 +341,8 @@ func TestATokenInAnUnusableRotationAnswerIsKeptOnTheErrorAndSent(t *testing.T) {
 			c := srv.client(t)
 			_, err := c.Agent.RotateToken(context.Background())
 			e := wantCode(t, err, KindOutcomeUnknown, "outcome_unknown")
-			if e.UnusableToken != newTokenText || e.Hint != rotateHint {
-				t.Errorf("UnusableToken %q, hint %q", e.UnusableToken, e.Hint)
+			if e.ReceivedToken != newTokenText || e.Hint != rotateHint {
+				t.Errorf("ReceivedToken %q, hint %q", e.ReceivedToken, e.Hint)
 			}
 			for _, shown := range []string{e.Error(), fmt.Sprintf("%v", e), fmt.Sprintf("%+v", e), e.Message} {
 				if strings.Contains(shown, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") {
@@ -373,8 +373,8 @@ func TestAClaimWithATokenButNoUserOrScopesKeepsTheTokenOnTheError(t *testing.T) 
 		if e.Hint != claimHint || len(srv.to(claimRoute)) != 1 || strings.Contains(e.Error(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") {
 			t.Errorf("%s: hint %q, %d requests, text %q", name, e.Hint, len(srv.to(claimRoute)), e.Error())
 		}
-		if name != "bad token format" && e.UnusableToken != newTokenText {
-			t.Errorf("%s: UnusableToken %q", name, e.UnusableToken)
+		if name != "bad token format" && e.ReceivedToken != newTokenText {
+			t.Errorf("%s: ReceivedToken %q", name, e.ReceivedToken)
 		}
 	}
 }

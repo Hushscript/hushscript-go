@@ -28,8 +28,8 @@ func main() {
 		var failure *hushscript.Error
 		if errors.As(err, &failure) {
 			fmt.Fprintf(os.Stderr, "%s: %s\n", failure.Code, failure.Hint+failure.Message)
-			if failure.UnusableToken != "" {
-				if keepErr := keep(*tokenFile, failure.UnusableToken); keepErr == nil {
+			if failure.ReceivedToken != "" {
+				if keepErr := keep(*tokenFile, failure.ReceivedToken); keepErr == nil {
 					fmt.Fprintf(os.Stderr, "A token that came with the failed answer is in %s.\n", *tokenFile)
 				}
 			}

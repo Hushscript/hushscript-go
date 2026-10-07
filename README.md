@@ -227,7 +227,7 @@ creates it private, calls `Chmod`, and only then writes.
   token it replaces, so lose the new one and the account is out of reach. A claim or a rotation whose
   answer is lost, or comes back without a usable token, is a `KindOutcomeUnknown` error and is never
   retried, because a retry could not succeed; its `Hint` says what to check. When the answer did carry
-  a token but not the rest, `Error.UnusableToken` holds it so it is not lost.
+  a token but not the rest, `Error.ReceivedToken` holds it so it is not lost.
 - `DryRun: true` validates a signup without opening a checkout.
 
 ## Errors

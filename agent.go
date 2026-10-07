@@ -85,7 +85,7 @@ func (c *core) lostCredential(route string, status int, hint, token string) *Err
 	failure := newSDKError(KindOutcomeUnknown, "outcome_unknown",
 		"The answer to "+route+" could not be used, so the token may be lost.", c.badResponse(route, status), c.cfg.redactor(), hintInputs{})
 	failure.Hint = hint
-	failure.UnusableToken = token
+	failure.ReceivedToken = token
 	return failure
 }
 

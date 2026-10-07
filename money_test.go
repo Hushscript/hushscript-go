@@ -1,6 +1,9 @@
 package hushscript
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 const nbsp = " "
 
@@ -49,5 +52,20 @@ func TestEveryZeroAndThreeDigitCurrencyOfTheStripeTableHasItsDigits(t *testing.T
 		if got := newMoney(1234, code).Formatted; got != code+nbsp+"1.234" {
 			t.Errorf("%s: %q, want three digits", code, got)
 		}
+	}
+}
+
+// A code outside ISO 4217 is shown as the plain amount and the upper-cased code, with 2 digits, and
+// never fails: the same strings the TypeScript SDK shows.
+func TestAnUnknownCurrencyIsShownAsAPlainAmountAndCodeNeverFailing(t *testing.T) {
+	for _, currency := range []string{"ZZZ", "ZZZZ", "", "us", "x1"} {
+		got := newMoney(599, currency)
+		want := Money{Amount: 599, Currency: currency, Formatted: "5.99 " + strings.ToUpper(currency)}
+		if got != want {
+			t.Errorf("newMoney(599, %q) = %+v, want %+v", currency, got, want)
+		}
+	}
+	if got := newMoney(-150_000, "zzz").Formatted; got != "-1500.00 ZZZ" {
+		t.Errorf("negative unknown: %q", got)
 	}
 }

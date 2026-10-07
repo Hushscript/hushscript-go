@@ -20,6 +20,21 @@ type Money struct {
 var (
 	zeroDigitCurrencies  = setOf("BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA", "PYG", "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF")
 	threeDigitCurrencies = setOf("BHD", "JOD", "KWD", "OMR", "TND")
+	// knownCurrencies are the ISO 4217 codes the SDK prints with the code in front; any other string is
+	// shown plainly, as "5.99 ZZZ", and never fails.
+	knownCurrencies = setOf(
+		"AED", "AFN", "ALL", "AMD", "ANG", "AOA", "ARS", "AUD", "AWG", "AZN", "BAM", "BBD", "BDT", "BGN", "BHD",
+		"BIF", "BMD", "BND", "BOB", "BRL", "BSD", "BTN", "BWP", "BYN", "BZD", "CAD", "CDF", "CHF", "CLP", "CNY",
+		"COP", "CRC", "CUP", "CVE", "CZK", "DJF", "DKK", "DOP", "DZD", "EGP", "ERN", "ETB", "EUR", "FJD", "FKP",
+		"GBP", "GEL", "GHS", "GIP", "GMD", "GNF", "GTQ", "GYD", "HKD", "HNL", "HTG", "HUF", "IDR", "ILS", "INR",
+		"IQD", "IRR", "ISK", "JMD", "JOD", "JPY", "KES", "KGS", "KHR", "KMF", "KPW", "KRW", "KWD", "KYD", "KZT",
+		"LAK", "LBP", "LKR", "LRD", "LSL", "LYD", "MAD", "MDL", "MGA", "MKD", "MMK", "MNT", "MOP", "MRU", "MUR",
+		"MVR", "MWK", "MXN", "MYR", "MZN", "NAD", "NGN", "NIO", "NOK", "NPR", "NZD", "OMR", "PAB", "PEN", "PGK",
+		"PHP", "PKR", "PLN", "PYG", "QAR", "RON", "RSD", "RUB", "RWF", "SAR", "SBD", "SCR", "SDG", "SEK", "SGD",
+		"SHP", "SLE", "SOS", "SRD", "SSP", "STN", "SVC", "SYP", "SZL", "THB", "TJS", "TMT", "TND", "TOP", "TRY",
+		"TTD", "TWD", "TZS", "UAH", "UGX", "USD", "UYU", "UZS", "VES", "VND", "VUV", "WST", "XAF", "XCD", "XOF",
+		"XPF", "YER", "ZAR", "ZMW", "ZWG",
+	)
 	// currencySymbols are the symbols the en locale prints; any other currency shows its code.
 	currencySymbols = map[string]string{"USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥"}
 )
@@ -54,7 +69,11 @@ func newMoney(amount int, currency string) Money {
 	for range digits {
 		scale *= 10
 	}
-	number := groupThousands(strconv.FormatUint(magnitude/scale, 10))
+	whole := strconv.FormatUint(magnitude/scale, 10)
+	number := groupThousands(whole)
+	if !knownCurrencies[code] {
+		number = whole // the plain fallback is not grouped
+	}
 	if digits > 0 {
 		fraction := strconv.FormatUint(magnitude%scale, 10)
 		number += "." + strings.Repeat("0", digits-len(fraction)) + fraction
@@ -62,6 +81,9 @@ func newMoney(amount int, currency string) Money {
 	sign := ""
 	if amount < 0 {
 		sign = "-"
+	}
+	if !knownCurrencies[code] {
+		return Money{Amount: amount, Currency: currency, Formatted: sign + number + " " + code}
 	}
 	if symbol, ok := currencySymbols[code]; ok {
 		return Money{Amount: amount, Currency: currency, Formatted: sign + symbol + number}
