@@ -469,15 +469,15 @@ type hintInputs struct {
 func hintInputsFromDetails(details map[string]any) hintInputs {
 	var in hintInputs
 	read := func(level map[string]any) {
-		number := func(key string, limit float64, into *maybe[float64]) {
-			if value, ok := asFloat(level[key]); ok && value >= 0 && value <= limit {
+		number := func(key string, into *maybe[float64]) {
+			if value, ok := asFloat(level[key]); ok && value >= 0 && value <= maxDetailNumber {
 				*into = some(value)
 			}
 		}
-		number("needed_seconds", maxDetailNumber, &in.neededSeconds)
-		number("balance_seconds", maxDetailNumber, &in.balanceSeconds)
-		number("used_seconds", maxDetailNumber, &in.usedSeconds)
-		number("max_seconds", maxDetailNumber, &in.maxSeconds)
+		number("needed_seconds", &in.neededSeconds)
+		number("balance_seconds", &in.balanceSeconds)
+		number("used_seconds", &in.usedSeconds)
+		number("max_seconds", &in.maxSeconds)
 		if value, ok := retryAfterDetail(level["retry_after_seconds"]); ok {
 			in.retryAfterSeconds = some(value)
 		}
