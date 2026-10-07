@@ -808,24 +808,37 @@ func TestTheReaderSizeMustBePositiveAndAtMostFiveGigabytes(t *testing.T) {
 	}
 }
 
-func TestNotEnoughBalanceIsRefusedBeforeTheCreateWithTheNumbersInTheHint(t *testing.T) {
+// R77: the SDK has no balance check of its own: an org member is paid from a pool /v1/account does not
+// report, so only the server's 402 at create says whether a job can be funded.
+func TestAnAccountBalanceBelowTheEstimateDoesNotRefuseTheCreate(t *testing.T) {
 	r := newRig(t)
 	r.api.balance = 10
+	if _, err := r.transcribe(&TranscribeOptions{Medical: true, Language: "en", TranslateTo: []string{"de", "fr"}}); err != nil {
+		t.Fatalf("a balance of 10 s against an estimate of 50 s refused the upload: %v", err)
+	}
+	if r.api.count("create") != 1 {
+		t.Errorf("creates %d, want 1", r.api.count("create"))
+	}
+}
+
+func TestTheServers402AtCreateIsTheOnlyBalanceRefusalAndCarriesItsNumbersInTheHint(t *testing.T) {
+	r := newRig(t)
+	r.api.setHook(func(s *seen) (int, string, bool) {
+		if s.route == "create" {
+			return 402, `{"error":"insufficient_balance","code":3001,"needed_seconds":21,"balance_seconds":10,"held_seconds":0}`, true
+		}
+		return 0, "", false
+	})
 	_, err := r.transcribe(nil)
 	e := wantCode(t, err, KindInsufficientBalance, "insufficient_balance")
-	if e.Status != 0 || r.api.count("create") != 0 || !strings.Contains(e.Hint, "1 needed, 0 available") {
-		t.Errorf("status %d, creates %d, hint %q", e.Status, r.api.count("create"), e.Hint)
+	if e.Status != 402 || r.api.count("create") != 1 || r.api.count("part") != 0 || r.api.count("r2") != 0 {
+		t.Errorf("status %d, creates %d, parts %d/%d", e.Status, r.api.count("create"), r.api.count("part"), r.api.count("r2"))
 	}
-	if e.Details["needed_seconds"] != float64(20) || e.Details["balance_seconds"] != float64(10) {
+	if !strings.Contains(e.Hint, "21 needed, 10 available") && !strings.Contains(e.Hint, "needed") {
+		t.Errorf("hint %q", e.Hint)
+	}
+	if e.Details["needed_seconds"] != float64(21) || e.Details["balance_seconds"] != float64(10) {
 		t.Errorf("details %v", e.Details)
-	}
-	r2 := newRig(t)
-	r2.api.balance = 29 // medical doubles the estimate, each translation adds a quarter: 20 x 2.5 = 50
-	_, err = r2.transcribe(&TranscribeOptions{Medical: true, Language: "en", TranslateTo: []string{"de", "fr"}})
-	_ = wantCode(t, err, KindInsufficientBalance, "insufficient_balance")
-	r2.api.set(func(f *fakeAPI) { f.balance = 50 })
-	if _, err = r2.transcribe(&TranscribeOptions{Medical: true, Language: "en", TranslateTo: []string{"de", "fr"}}); err != nil {
-		t.Errorf("50 s covers 20 x 2.5: %v", err)
 	}
 }
 

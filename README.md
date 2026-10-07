@@ -308,8 +308,9 @@ instead, so a malformed answer comes back as an error, not a panic.
 ## What the SDK does for you
 
 - **Checks before it spends.** It sniffs the format from the file's bytes, probes the duration,
-  and refuses a file the server would refuse, or one your balance or daily limit cannot cover,
-  before any minutes are held.
+  and refuses a file the server would refuse, or one your daily limit cannot cover, before any
+  minutes are held. It does not check your balance: the server decides at create whether the job can
+  be paid (an organization pool can pay for it), and its 402 arrives before any part is sent.
 - **Keeps retries from charging twice.** Every upload and purchase carries an idempotency key, and
   retries reuse it. A resume token replays the same job instead of starting a new one, and the key
   on a failed purchase does the same for `Buy`.
@@ -409,7 +410,7 @@ API document leaves out (`signup_id` on the claim operation), in a private copy 
 - The Scorecard workflow has `id-token: write`, which section 13.3 allows only for publishing:
   Scorecard needs it to publish its results.
 - The `audit` compose service has outbound network access, next to `regen` and `smoke`: `go mod tidy
-  -diff` and `govulncheck` ask the module proxy and the vulnerability database.
+  -diff` (the module and `tools/`) and `govulncheck` ask the module proxy and the vulnerability database.
 
 ## Security
 

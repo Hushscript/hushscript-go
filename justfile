@@ -112,7 +112,7 @@ build version=floor:
       trap 'rm -rf "$old"' EXIT
       git archive "$last" | tar -x -C "$old"
       docker run {{sandbox}} --network none --user "$user" -e GOPROXY=off --tmpfs /tmp:exec,size=3g -v "$old":/old:ro "hushscript-go-dev:go{{version}}" \
-        sh -c 'cd /old && go tool apidiff -m -w /tmp/old.export github.com/Hushscript/hushscript-go && cd /work && go tool apidiff -m -incompatible /tmp/old.export github.com/Hushscript/hushscript-go'
+        sh -c 'cd /old && go tool -modfile=/work/tools/go.mod apidiff -m -w /tmp/old.export github.com/Hushscript/hushscript-go && cd /work && go tool -modfile=tools/go.mod apidiff -m -incompatible /tmp/old.export github.com/Hushscript/hushscript-go'
     fi
 
 # regenerate openapi.json and generated/ from the production spec, or from a local spec file (outbound network)

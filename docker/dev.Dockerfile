@@ -17,7 +17,11 @@ WORKDIR /work
 # The module cache is filled from the lockfile only; containers that run without network read it from here.
 FROM base AS deps
 COPY go.mod go.sum ./
+COPY tools/go.mod tools/go.sum tools/
 RUN go mod download
+WORKDIR /work/tools
+RUN go mod download
+WORKDIR /work
 
 FROM base AS dev
 COPY --from=deps /go/pkg/mod /go/pkg/mod

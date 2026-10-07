@@ -236,6 +236,21 @@ func TestNeverLetsTheTokenIntoAnythingAnErrorExposes(t *testing.T) {
 	}
 }
 
+// Pinning only (the code already redacts these): a server that echoes the token as its error slug, as a
+// details key at the top level or nested, or as a value, leaks it through no field of the error.
+func TestRedactsTheTokenInTheServersSlugAndInDetailsKeys(t *testing.T) {
+	body := `{"error":"` + testToken + `","code":2000,"` + testToken + `":"top","details":{"` + testToken + `":{"` + testToken + `":1},"k":"` + testToken + `"}}`
+	e := fromResponse(401, nil, body, http.MethodGet, "/v1/account")
+	for name, text := range map[string]string{
+		"code": e.Code, "message": e.Message, "hint": e.Hint, "details": asText(e.Details), "error": e.Error(),
+		"verbose": fmt.Sprintf("%+v %#v %v", e, e, e.Details),
+	} {
+		if strings.Contains(text, testSecret) || strings.Contains(text, testToken) {
+			t.Errorf("%s leaked the token: %s", name, text)
+		}
+	}
+}
+
 func TestSDKErrorsCarryHintsAndTheirCause(t *testing.T) {
 	e := newSDKError(KindAbort, "aborted", "The request was cancelled.", context.Canceled, redactor{}, hintInputs{})
 	if !errors.Is(e, context.Canceled) {
