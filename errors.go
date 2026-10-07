@@ -391,7 +391,10 @@ func retryAfterOf(header http.Header, inputs hintInputs) (time.Duration, bool) {
 	if wait, ok := parseRetryAfter(header); ok {
 		return wait, true
 	}
-	if seconds, ok := inputs.retryAfterSeconds.get(); ok && seconds <= maxWaitSeconds {
+	if seconds, ok := inputs.retryAfterSeconds.get(); ok {
+		if seconds >= maxWaitSeconds {
+			return time.Duration(maxWaitSeconds) * time.Second, true
+		}
 		return time.Duration(seconds * float64(time.Second)), true
 	}
 	return 0, false
