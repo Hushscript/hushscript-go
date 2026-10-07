@@ -128,8 +128,9 @@ func checkOptions(red redactor, opts *TranscribeOptions) error {
 }
 
 // annotator adds what a caller needs to the errors of one call: the idempotency key once the create
-// was sent, the resume token once the job id is known (spec 7.3), and the SDK's own abort error for a
-// bare context error.
+// was sent, the resume token once the job id is known (spec 7.3), the SDK's own abort error for a
+// bare context error, and, once a request that carries a key or token was sent, unexpected_error for
+// any other failure that is not an SDK error (spec 9.2).
 type annotator struct {
 	core  *core
 	key   string
@@ -139,9 +140,12 @@ type annotator struct {
 func (a *annotator) annotate(ctx context.Context, err error) error {
 	failure, ok := err.(*Error) //nolint:errorlint // the pipeline returns its own errors unwrapped
 	if !ok {
-		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		switch {
+		case ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 			failure = a.core.abortError(err)
-		} else {
+		case a.key != "" || a.token != "":
+			failure = a.core.unexpectedError(err)
+		default:
 			failure = a.core.requestNotBuilt(err)
 		}
 	}
@@ -158,6 +162,13 @@ func (a *annotator) annotate(ctx context.Context, err error) error {
 // path that cannot form a URL causes.
 func (c *core) requestNotBuilt(cause error) *Error {
 	return newSDKError(KindConfiguration, "config_invalid", "The request could not be built.", cause, c.cfg.redactor(), hintInputs{})
+}
+
+// unexpectedError is the error for a failure of the SDK's own after a request was sent that fits no
+// other class (spec 9.2). It has no kind of its own in Go: it is the base ApiError kind with no status.
+// The original rides along as a redacted cause.
+func (c *core) unexpectedError(cause error) *Error {
+	return newSDKError(KindAPI, "unexpected_error", "The SDK failed unexpectedly after the request was sent.", cause, c.cfg.redactor(), hintInputs{})
 }
 
 // Transcribe uploads the file at path, waits for it to be transcribed and returns the transcript. The

@@ -11,11 +11,11 @@ var hints = map[string]string{
 	"agent_pack_locked":                    "New agent accounts can buy {allowedPacks} until earlier purchases settle.",
 	"agent_purchase_capped":                "This account has used its 3 purchase attempts for the last 24 hours. Try again in {retryAfter} s.",
 	"daily_limit":                          "This upload would pass your daily transcription limit ({used} of {max} min used in the last 24 h).",
-	"default_card_required":                "You have more than one saved card and none is the default. Pick one with hs.billing.setDefaultCard(id) or in the app.",
+	"default_card_required":                "You have more than one saved card and none is the default. Set a default card with the SDK's billing methods or in the app.",
 	"duration_out_of_range":                "Files must be between 15 seconds and 10 hours long.",
 	"duration_unreadable":                  "Could not read the file's duration. Pass durationSeconds.",
-	"insufficient_balance":                 "Not enough minutes: {needed} needed, {balance} available. Buy a pack with hs.buy(\"300min\") or in the app.",
-	"no_default_card":                      "No saved card. Open hs.billing.addCardUrl() in a browser to add one, or add it in the app.",
+	"insufficient_balance":                 "Not enough minutes: {needed} needed, {balance} available. Buy a pack with the SDK's buy method or in the app.",
+	"no_default_card":                      "No saved card. Open the add-card link from the SDK's billing methods in a browser, or add a card in the app.",
 	"pat_purchase_requires_app":            "The saved card was declined or can't be charged automatically. Buy this pack in the Hushscript app.",
 	"pat_purchase_requires_authentication": "Your bank wants to confirm this payment. Buy this pack in the Hushscript app.",
 	"pat_scope_missing":                    "This call needs the \"{scope}\" permission. Create a token that includes it. For billing, the token also needs \"Let this token buy minutes\" turned on when you create it, and \"Let connected apps buy minutes\" must be on in the app under Account → MCP.",
@@ -29,7 +29,7 @@ var hints = map[string]string{
 	"too_many_active_jobs":                 "50 jobs are already in progress. Wait for some to finish.",
 	"unauthorized":                         "Your token is invalid, revoked or expired. Create a new one in the Hushscript app under Account → MCP. Changing your password revokes all tokens.",
 	"unsupported_media":                    "Supported: MP3, M4A/MP4/MOV, WAV, FLAC, OGG/Opus. Convert it first, e.g. ffmpeg -i input -vn -c:a libopus output.opus",
-	"wrong_state":                          "The job has already moved on. Call hs.jobs.get(id) to see where it is.",
+	"wrong_state":                          "The job has already moved on. Fetch the job to see where it is.",
 }
 
 // Hint returns the shared hint text for an error slug.

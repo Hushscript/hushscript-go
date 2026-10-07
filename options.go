@@ -73,6 +73,11 @@ type TranscribeOptions struct {
 	// when it runs out, and the error carries a resume token.
 	WaitTimeout time.Duration
 	// OnProgress receives upload and processing reports.
+	//
+	// OnProgress and OnResumeToken cannot return an error. A panic in one is the caller's own: the
+	// SDK does not recover it or wrap it, and it leaves the call with the value it was raised with (a
+	// panic in OnProgress on an upload worker stops the upload and is raised again, unchanged, on the
+	// goroutine that made the call).
 	OnProgress func(Progress)
 	// OnResumeToken is called once, as soon as the job exists.
 	OnResumeToken func(token string)

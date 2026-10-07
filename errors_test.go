@@ -246,7 +246,7 @@ func TestSDKErrorsCarryHintsAndTheirCause(t *testing.T) {
 		t.Error("errors.As does not find the SDK error")
 	}
 	hinted := newSDKError(KindUpload, "wrong_state", "x", nil, redactor{}, hintInputs{})
-	if !strings.Contains(hinted.Hint, "hs.jobs.get") {
+	if !strings.Contains(hinted.Hint, "Fetch the job") {
 		t.Errorf("hint for an SDK slug = %q", hinted.Hint)
 	}
 	if e.Unwrap() == nil || hinted.Unwrap() != nil {

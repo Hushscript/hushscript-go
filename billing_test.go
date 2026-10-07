@@ -200,9 +200,9 @@ func TestBuyPicksTheDefaultThenTheOnlyEligibleCardThenRefusesBeforeAnyPurchase(t
 	for name, tc := range map[string]struct {
 		cards, code, hint string
 	}{
-		"no cards":        {cardsBody(""), "no_default_card", "hs.billing.addCardUrl()"},
-		"none eligible":   {cardsBody("", card("pm_x", false, false)), "no_default_card", "hs.billing.addCardUrl()"},
-		"several, no one": {cardsBody("", card("pm_x", false, true), card("pm_y", false, true)), "default_card_required", "hs.billing.setDefaultCard(id)"},
+		"no cards":        {cardsBody(""), "no_default_card", "add-card link"},
+		"none eligible":   {cardsBody("", card("pm_x", false, false)), "no_default_card", "add-card link"},
+		"several, no one": {cardsBody("", card("pm_x", false, true), card("pm_y", false, true)), "default_card_required", "Set a default card"},
 	} {
 		api, used, err := pick(t, tc.cards)
 		e := wantCode(t, err, KindPaymentMethodRequired, tc.code)
