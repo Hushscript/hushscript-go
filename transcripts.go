@@ -114,13 +114,14 @@ func (c *core) transcriptPage(ctx context.Context, cursor string, size int) (Pag
 	if err != nil {
 		return Page[TranscriptSummary]{}, c.readFailed(err, route)
 	}
-	if failure := c.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "transcripts"); failure != nil {
+	parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
+	if failure := c.unusable(route, response.HTTPResponse, parsed != nil, response.Body, "transcripts"); failure != nil {
 		return Page[TranscriptSummary]{}, failure
 	}
 	if !rowsHave(response.Body, "transcripts", "id", "created_at") {
 		return Page[TranscriptSummary]{}, c.badResponse(route, response.StatusCode())
 	}
-	list := response.JSON200
+	list := parsed
 	page := Page[TranscriptSummary]{NextCursor: valueOf(list.NextCursor), Items: make([]TranscriptSummary, len(list.Transcripts))}
 	for i := range list.Transcripts {
 		row := &list.Transcripts[i]
@@ -145,6 +146,9 @@ func (t TranscriptsService) Get(ctx context.Context, id string) (*Transcript, er
 	if t.core == nil {
 		return nil, newConfigError(notBuiltMessage)
 	}
+	if err := checkID(t.core.cfg.redactor(), "The transcript id", id); err != nil {
+		return nil, err
+	}
 	transcript, err := t.core.readTranscript(ctx, id)
 	if err != nil {
 		return nil, (&annotator{core: t.core}).annotate(ctx, err)
@@ -168,7 +172,8 @@ func (t TranscriptsService) Deleted(ctx context.Context) iter.Seq2[DeletedTransc
 		if err != nil {
 			return Page[DeletedTranscript]{}, core.readFailed(err, route)
 		}
-		if failure := core.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "deleted"); failure != nil {
+		parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
+		if failure := core.unusable(route, response.HTTPResponse, parsed != nil, response.Body, "deleted"); failure != nil {
 			return Page[DeletedTranscript]{}, failure
 		}
 		if !rowsHave(response.Body, "deleted", "id", "created_at", "deleted_at") {

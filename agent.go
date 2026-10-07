@@ -173,11 +173,12 @@ func AgentSignup(ctx context.Context, req AgentSignupRequest, opts ...Option) (*
 	if err != nil {
 		return nil, (&annotator{core: core}).annotate(ctx, core.readFailed(err, signupOp))
 	}
-	if failure := core.unusable(signupOp, response.HTTPResponse, response.JSON200 != nil, response.Body,
+	parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
+	if failure := core.unusable(signupOp, response.HTTPResponse, parsed != nil, response.Body,
 		"signup_id", "claim_secret", "checkout_url", "amount", "currency", "expires_at"); failure != nil {
 		return nil, failure
 	}
-	signup := response.JSON200
+	signup := parsed
 	return &AgentSignupResult{
 		SignupID: signup.SignupId, ClaimSecret: signup.ClaimSecret, CheckoutURL: signup.CheckoutUrl,
 		Price: newMoney(signup.Amount, signup.Currency), ExpiresAt: unixTime(int64(signup.ExpiresAt)),
@@ -192,6 +193,9 @@ func AgentSignup(ctx context.Context, req AgentSignupRequest, opts ...Option) (*
 func AgentClaim(ctx context.Context, signupID, claimSecret string, opts ...Option) (*AgentAccount, error) {
 	cfg, err := resolveTokenless(opts)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkID(cfg.redactor(), "The signup id", signupID); err != nil {
 		return nil, err
 	}
 	core, err := newCore(cfg)

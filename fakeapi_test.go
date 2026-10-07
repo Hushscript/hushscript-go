@@ -196,6 +196,8 @@ type fakeAPI struct {
 	onR2        func(n int)
 	urlBase     string // where part URLs point; default this server
 	deadPart    int    // a part whose URL points at a closed port
+	// successStatus makes a route answer its successes with this 2xx status instead of 200.
+	successStatus map[string]int
 
 	parts      map[int]partRecord
 	r2Failures []string
@@ -299,6 +301,19 @@ func routeOf(method, path string) (route string, n int) {
 	return "other", 0
 }
 
+// statusRewriter turns the 200 of a success into another 2xx status.
+type statusRewriter struct {
+	http.ResponseWriter
+	to int
+}
+
+func (s *statusRewriter) WriteHeader(status int) {
+	if status == http.StatusOK {
+		status = s.to
+	}
+	s.ResponseWriter.WriteHeader(status)
+}
+
 func writeJSON(w http.ResponseWriter, status int, body string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -355,6 +370,9 @@ func (f *fakeAPI) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.log = append(f.log, rec)
 	hook := f.hook
+	if status := f.successStatus[route]; status != 0 {
+		w = &statusRewriter{ResponseWriter: w, to: status}
+	}
 	f.mu.Unlock()
 	if hook != nil {
 		if status, body, handled := hook(&rec); handled {
