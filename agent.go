@@ -88,7 +88,7 @@ func (c *core) lostCredential(route string, status int, hint, token string) *Err
 		"The answer to "+route+" could not be used, so the token may be lost.", c.badResponse(route, status), c.cfg.redactor(), hintInputs{})
 	failure.Hint = hint
 	if strings.TrimSpace(token) != "" {
-		failure.receivedToken = &token
+		failure.receivedToken = newSecret(token)
 	}
 	return failure
 }
@@ -123,8 +123,9 @@ func (a credentialAnswer) expiry() (at *time.Time, ok bool) {
 	return &found, true
 }
 
-// readCredential sends a claim or rotation and reads its 2xx answer. It returns the token string
-// whenever the answer carried one, even when the rest was unusable, and ok only for a usable answer.
+// readCredential reads the 2xx answer of a claim or rotation. It returns the token string whenever
+// the answer carried one, even when the rest was unusable, and ok only for a usable answer. The
+// answer is decoded and checked whatever the 2xx status, so a 201 or 203 is judged on its body.
 func (c *core) readCredential(resp *http.Response, required func(credentialAnswer) bool) (answer credentialAnswer, seen string, ok bool) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -134,7 +135,7 @@ func (c *core) readCredential(resp *http.Response, required func(credentialAnswe
 	if json.Unmarshal(body, &loose) == nil {
 		seen, _ = loose["pat"].(string)
 	}
-	if resp.StatusCode != http.StatusOK || json.Unmarshal(body, &answer) != nil || answer.Pat == nil || !acceptableToken(*answer.Pat) || !required(answer) {
+	if json.Unmarshal(body, &answer) != nil || answer.Pat == nil || !acceptableToken(*answer.Pat) || !required(answer) {
 		return answer, seen, false
 	}
 	return answer, seen, true

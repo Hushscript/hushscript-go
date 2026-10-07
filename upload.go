@@ -28,8 +28,32 @@ const (
 type uploadPlan struct {
 	partSize   int64
 	totalParts int
-	urls       []generated.PresignedPartUrl
+	urls       []partURL
 	next       int // 0 once every part has a URL
+}
+
+// partURL is a presigned part URL, held as a secret because its query is a signature.
+type partURL struct {
+	n   int
+	url secret
+}
+
+func partURLsOf(rows []generated.PresignedPartUrl) []partURL {
+	urls := make([]partURL, len(rows))
+	for i, row := range rows {
+		urls[i] = partURL{n: row.N, url: newSecret(row.Url)}
+	}
+	return urls
+}
+
+// partRowsUsable reports whether every part URL row has a positive part number and a URL.
+func partRowsUsable(rows []generated.PresignedPartUrl) bool {
+	for _, row := range rows {
+		if row.N <= 0 || row.Url == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func planOf(created *generated.UploadCreateResponse) *uploadPlan {
@@ -39,7 +63,7 @@ func planOf(created *generated.UploadCreateResponse) *uploadPlan {
 	plan := &uploadPlan{
 		partSize:   int64(created.Upload.PartSizeBytes),
 		totalParts: created.Upload.TotalParts,
-		urls:       created.Upload.PartUrls,
+		urls:       partURLsOf(created.Upload.PartUrls),
 	}
 	if created.Upload.NextPartNumber != nil {
 		plan.next = *created.Upload.NextPartNumber
@@ -505,7 +529,7 @@ type partPages struct {
 
 type urlPage struct {
 	start     int
-	urls      map[int]string
+	urls      map[int]secret
 	fetchedAt time.Time
 }
 
@@ -523,12 +547,12 @@ func newPartPages(c *core, job string, plan *uploadPlan) *partPages {
 }
 
 // store records a page and returns its first part number. Call it without the lock held.
-func (p *partPages) store(urls []generated.PresignedPartUrl) int {
-	start := urls[0].N
-	page := &urlPage{urls: make(map[int]string, len(urls)), fetchedAt: p.core.cfg.clock.Now()}
+func (p *partPages) store(urls []partURL) int {
+	start := urls[0].n
+	page := &urlPage{urls: make(map[int]secret, len(urls)), fetchedAt: p.core.cfg.clock.Now()}
 	for _, entry := range urls {
-		start = min(start, entry.N)
-		page.urls[entry.N] = entry.Url
+		start = min(start, entry.n)
+		page.urls[entry.n] = entry.url
 	}
 	page.start = start
 	p.mu.Lock()
@@ -586,7 +610,7 @@ func (p *partPages) load(ctx context.Context, start int) error {
 	if failure := p.core.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "part_urls"); failure != nil {
 		return failure
 	}
-	if !rowsHave(response.Body, "part_urls", "n", "url") {
+	if !rowsHave(response.Body, "part_urls", "n", "url") || !partRowsUsable(response.JSON200.PartUrls) {
 		return p.core.badResponse(route, response.StatusCode())
 	}
 	if len(response.JSON200.PartUrls) == 0 {
@@ -595,7 +619,7 @@ func (p *partPages) load(ctx context.Context, start int) error {
 		p.mu.Unlock()
 		return nil
 	}
-	stored := p.store(response.JSON200.PartUrls)
+	stored := p.store(partURLsOf(response.JSON200.PartUrls))
 	p.mu.Lock()
 	if p.next == stored {
 		p.next = 0
@@ -629,7 +653,7 @@ func (p *partPages) urlFor(ctx context.Context, n int) (signedURL string, direct
 		case p.core.cfg.clock.Now().Sub(page.fetchedAt) > urlMaxAge:
 			start = page.start
 		default:
-			return page.urls[n], true, nil
+			return page.urls[n].reveal(), true, nil
 		}
 		if fetchErr := p.fetchPage(ctx, start); fetchErr != nil {
 			return "", false, fetchErr
@@ -642,7 +666,7 @@ func (p *partPages) urlFor(ctx context.Context, n int) (signedURL string, direct
 func (p *partPages) refresh(ctx context.Context, n int, stale string) error {
 	p.mu.Lock()
 	page := p.pageOf(n)
-	if page == nil || page.urls[n] != stale {
+	if page == nil || page.urls[n].reveal() != stale {
 		p.mu.Unlock()
 		return nil
 	}

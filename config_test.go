@@ -37,7 +37,7 @@ func TestReadsTheTokenFromTheEnvironmentAndLetsTheOptionWin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := string(c.core.cfg.token); got != testToken {
+	if got := c.core.cfg.token.reveal(); got != testToken {
 		t.Errorf("token from environment = %q", got)
 	}
 	other := "hsr1:us:pat.aa.bb"
@@ -45,7 +45,7 @@ func TestReadsTheTokenFromTheEnvironmentAndLetsTheOptionWin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := string(c.core.cfg.token); got != other {
+	if got := c.core.cfg.token.reveal(); got != other {
 		t.Errorf("token from option = %q", got)
 	}
 }
@@ -220,7 +220,7 @@ func TestNeverPrintsTheToken(t *testing.T) {
 	if !strings.Contains(c.String(), "hsr…[redacted]") {
 		t.Errorf("the string form should show the redaction marker: %v", c)
 	}
-	if !strings.Contains(c.GoString(), "hsr…[redacted]") || !strings.Contains(cfg.GoString(), "hsr…[redacted]") {
+	if !strings.Contains(c.GoString(), "hsr…[redacted]") {
 		t.Error("GoString should show the redaction marker")
 	}
 	if got := cfg.token.String() + cfg.token.GoString() + cfg.token.String(); strings.Contains(got, testSecret) {
@@ -231,7 +231,7 @@ func TestNeverPrintsTheToken(t *testing.T) {
 func TestNeverLogsTheToken(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-	logger.Info("config", "token", secret(testToken))
+	logger.Info("config", "token", newSecret(testToken))
 	if strings.Contains(buf.String(), testSecret) {
 		t.Errorf("slog printed the token: %s", buf.String())
 	}

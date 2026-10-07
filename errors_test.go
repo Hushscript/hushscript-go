@@ -15,7 +15,7 @@ import (
 func asText(v any) string { return fmt.Sprintf("%v", v) }
 
 func fromResponse(status int, header http.Header, body, method, path string) *Error {
-	return errorFromResponse(status, header, []byte(body), method, path, redactor{token: testToken})
+	return errorFromResponse(status, header, []byte(body), method, path, newRedactor(testToken))
 }
 
 func TestMapsStatusesAndSlugsToKinds(t *testing.T) {
@@ -225,7 +225,7 @@ func TestUsesTheStatusForAnUnknownSlug(t *testing.T) {
 func TestNeverLetsTheTokenIntoAnythingAnErrorExposes(t *testing.T) {
 	body := `{"error":"unauthorized","code":2000,"details":{"echo":"` + testToken + `","nested":["` + testToken + `"]},"note":"` + testToken + `"}`
 	e := fromResponse(401, nil, body, http.MethodGet, "/v1/account")
-	wrapped := newSDKError(KindNetwork, "network_error", "GET failed", errors.New("dial "+testToken), redactor{token: testToken}, hintInputs{})
+	wrapped := newSDKError(KindNetwork, "network_error", "GET failed", errors.New("dial "+testToken), newRedactor(testToken), hintInputs{})
 	for name, text := range map[string]string{
 		"message": e.Message, "hint": e.Hint, "details": asText(e.Details), "error": e.Error(),
 		"wrapped": wrapped.Error(), "cause": wrapped.Unwrap().Error(), "verbose": fmt.Sprintf("%+v %#v", e, wrapped),

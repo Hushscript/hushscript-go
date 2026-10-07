@@ -239,6 +239,9 @@ func (c *core) createUpload(ctx context.Context, body createBody) (*generated.Up
 	if failure := c.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "job_id", "state"); failure != nil {
 		return nil, failure
 	}
+	if upload := response.JSON200.Upload; upload != nil && !partRowsUsable(upload.PartUrls) {
+		return nil, c.badResponse(route, response.StatusCode())
+	}
 	return response.JSON200, nil
 }
 

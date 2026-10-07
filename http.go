@@ -274,6 +274,10 @@ func (d *doer) attempt(parent context.Context, req *http.Request) outcome {
 		return outcome{err: err, sent: !unsent, took: time.Since(started)}
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// net/http keeps the request on the response, and the caller gets the response back.
+	if resp.Request != nil {
+		resp.Request.Header.Del("Authorization")
+	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, d.limit+1))
 	if err == nil && int64(len(body)) > d.limit {
 		err = errResponseTooLarge

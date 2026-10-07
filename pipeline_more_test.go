@@ -133,7 +133,7 @@ func TestAFLACBehindAnID3TagIsRecognizedAndProbed(t *testing.T) {
 }
 
 func TestARedactorHidesTheQueryOfAnyURLInText(t *testing.T) {
-	r := redactor{token: testToken}
+	r := newRedactor(testToken)
 	in := `Put "https://r2.example.com/bucket/key?X-Amz-Signature=abcdef&X-Amz-Credential=zzz": dial tcp 1.2.3.4:443: connection refused; also http://127.0.0.1:4010/__r2/j/3?X-Amz-Signature=q`
 	got := r.apply(in)
 	if strings.Contains(got, "abcdef") || strings.Contains(got, "zzz") || strings.Contains(got, "=q") || !strings.Contains(got, "https://r2.example.com/bucket/key?…[redacted]") {
@@ -600,6 +600,10 @@ func TestAPartURLsAnswerWithoutUsableRowsIsBadResponseAndStoresNothing(t *testin
 		"row without n":        `{"part_urls":[{"url":"https://r2.example/1"}]}`,
 		"later row incomplete": `{"part_urls":[{"n":1,"url":"https://r2.example/1"},{"n":2}]}`,
 		"url null":             `{"part_urls":[{"n":1,"url":null}]}`,
+		"n zero":               `{"part_urls":[{"n":0,"url":"https://r2.example/0"}]}`,
+		"n negative":           `{"part_urls":[{"n":-1,"url":"https://r2.example/1"}]}`,
+		"url empty":            `{"part_urls":[{"n":1,"url":""}]}`,
+		"later row unusable":   `{"part_urls":[{"n":1,"url":"https://r2.example/1"},{"n":0,"url":"https://r2.example/0"}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := newRouteServer(t, func(recorded, int) step { return ok(body) })
@@ -620,5 +624,30 @@ func TestAPartURLsAnswerWithoutUsableRowsIsBadResponseAndStoresNothing(t *testin
 	pages := newPartPages(srv.client(t).core, "j1", &uploadPlan{next: 1})
 	if err := pages.load(context.Background(), 1); err != nil || len(pages.pages) != 1 {
 		t.Errorf("a complete answer: %v, %d pages", err, len(pages.pages))
+	}
+}
+
+// The create answer's own part_urls rows are held to the same rule: a part number of zero or less, or
+// an empty URL, is a bad_response and no part is sent.
+func TestACreateAnswerWithUnusablePartURLRowsIsBadResponse(t *testing.T) {
+	for name, rows := range map[string]string{
+		"n zero":     `[{"n":0,"url":"https://r2.example/0"}]`,
+		"n negative": `[{"n":-3,"url":"https://r2.example/3"}]`,
+		"url empty":  `[{"n":1,"url":""}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			r.api.setHook(func(s *seen) (int, string, bool) {
+				if s.route == "create" {
+					return 200, `{"job_id":"job_1","state":"uploading","balance_seconds":1,"held_seconds":1,"funding":"personal","limits":{"active_jobs":1,"max_active_jobs":50,"max_daily_seconds":1,"used_today_seconds":0},"upload":{"part_size_bytes":160000,"total_parts":1,"part_urls":` + rows + `,"next_part_number":null}}`, true
+				}
+				return 0, "", false
+			})
+			_, err := r.transcribe(nil)
+			_ = wantCode(t, err, KindAPI, "bad_response")
+			if r.api.count("r2") != 0 || r.api.count("part") != 0 {
+				t.Errorf("parts were sent: r2 %d, proxied %d", r.api.count("r2"), r.api.count("part"))
+			}
+		})
 	}
 }

@@ -332,7 +332,6 @@ func TestATokenInAnUnusableRotationAnswerIsKeptOnTheErrorAndSent(t *testing.T) {
 	for name, answer := range map[string]step{
 		"no pat_id":         ok(`{"pat":"` + newTokenText + `","scopes":[]}`),
 		"scopes not a list": ok(`{"pat":"` + newTokenText + `","pat_id":"p","scopes":"transcribe"}`),
-		"202":               {status: 202, body: `{"pat":"` + newTokenText + `","pat_id":"p","scopes":[]}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := newRouteServer(t, func(rec recorded, _ int) step {
@@ -537,6 +536,68 @@ func TestARotationWhoseExpiryCannotBeReadKeepsTheOldTokenAndTheNewOneOnTheError(
 				t.Errorf("the old token was swapped out: %q", got)
 			}
 		})
+	}
+}
+
+// The answer is read the same whatever the 2xx status: a 201 or 203 with an expiry that cannot be
+// read leaves the old token in place, exactly as a 200 does (TS parity).
+func TestARotationAnswerIsJudgedOnItsBodyForEvery2xxStatus(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusCreated, http.StatusAccepted, http.StatusNonAuthoritativeInfo} {
+		for name, expires := range map[string]string{"a string": `"soon"`, "a fraction": `1.5`, "beyond the bound": `8640000000001`} {
+			t.Run(fmt.Sprintf("%d %s", status, name), func(t *testing.T) {
+				srv := newRouteServer(t, func(rec recorded, _ int) step {
+					if rec.path == "/v1/agent/credentials/rotate" {
+						answer := rotateAnswer(expires)
+						answer.status = status
+						return answer
+					}
+					return ok(`{"balance_seconds":600,"held_seconds":0,"limits":{}}`)
+				})
+				c := srv.client(t)
+				result, err := c.Agent.RotateToken(context.Background())
+				e := wantCode(t, err, KindOutcomeUnknown, "outcome_unknown")
+				if result != nil || e.ReceivedToken() != newTokenText || e.Hint != rotateHint {
+					t.Errorf("result %+v, ReceivedToken %q, hint %q", result, e.ReceivedToken(), e.Hint)
+				}
+				if _, err := c.Balance(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				if got := srv.to("GET /v1/account")[0].header.Get("Authorization"); got != "Bearer "+testToken {
+					t.Errorf("status %d: the old token was swapped out: %q", status, got)
+				}
+			})
+		}
+	}
+}
+
+func TestAUsableRotationOrClaimAnswerIsAcceptedWhatever2xxStatusCarriesIt(t *testing.T) {
+	for _, status := range []int{http.StatusCreated, http.StatusAccepted, http.StatusNonAuthoritativeInfo} {
+		rotated := newRouteServer(t, func(rec recorded, _ int) step {
+			if rec.path == "/v1/agent/credentials/rotate" {
+				answer := rotateAnswer("1790000000")
+				answer.status = status
+				return answer
+			}
+			return ok(`{"balance_seconds":600,"held_seconds":0,"limits":{}}`)
+		})
+		c := rotated.client(t)
+		if got, err := c.Agent.RotateToken(context.Background()); err != nil || got.Token != newTokenText {
+			t.Fatalf("rotate %d: %+v, %v", status, got, err)
+		}
+		if _, err := c.Balance(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := rotated.to("GET /v1/account")[0].header.Get("Authorization"); got != "Bearer "+newTokenText {
+			t.Errorf("rotate %d: the new token was not adopted: %q", status, got)
+		}
+		claimed := newRouteServer(t, func(recorded, int) step {
+			answer := claimAnswer()
+			answer.status = status
+			return answer
+		})
+		if got, err := AgentClaim(context.Background(), "sg_1", "cs", tokenless(claimed)...); err != nil || got.Token != newTokenText {
+			t.Errorf("claim %d: %+v, %v", status, got, err)
+		}
 	}
 }
 
