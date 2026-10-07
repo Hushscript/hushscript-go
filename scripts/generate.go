@@ -5,7 +5,7 @@
 //
 // The spec defaults to https://api.hushscript.com/openapi.json. hints.json is read from
 // $CONFORMANCE_DIR/hints.json when that is set, otherwise from the conformance repository at the
-// tag in gen.ConformanceRef.
+// ref in the conformance-ref file.
 package main
 
 import (
@@ -124,7 +124,11 @@ func loadHints(ctx context.Context) ([]byte, error) {
 	if dir := os.Getenv("CONFORMANCE_DIR"); dir != "" {
 		return readFile(filepath.Join(dir, "hints.json"))
 	}
-	return fetch(ctx, "https://raw.githubusercontent.com/Hushscript/hushscript-sdk-conformance/"+gen.ConformanceRef+"/hints.json")
+	ref, err := readFile("conformance-ref")
+	if err != nil {
+		return nil, err
+	}
+	return fetch(ctx, "https://raw.githubusercontent.com/Hushscript/hushscript-sdk-conformance/"+strings.TrimSpace(string(ref))+"/hints.json")
 }
 
 func loadText(ctx context.Context, source string) ([]byte, error) {

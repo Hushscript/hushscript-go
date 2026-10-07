@@ -4,6 +4,11 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 export HOST_UID := `id -u`
 export HOST_GID := `id -g`
+# No scenario may be skipped: an unmapped op fails the conformance run.
+export CONFORMANCE_STRICT := env("CONFORMANCE_STRICT", "1")
+# The conformance suite is read at the ref in conformance-ref, the one place it is pinned.
+conformance_ref := `tr -d '[:space:]' < conformance-ref`
+export CONFORMANCE_CONTEXT := env("CONFORMANCE_CONTEXT", "https://github.com/Hushscript/hushscript-sdk-conformance.git#" + conformance_ref)
 
 hadolint_image := "hadolint/hadolint:v2.14.0@sha256:27086352fd5e1907ea2b934eb1023f217c5ae087992eb59fde121dce9c9ff21e"
 actionlint_image := "rhysd/actionlint:1.7.8@sha256:96d4a8c87dbbfb3bdd324f8fdc285fc3df5261e2decc619a4dd7e8ee52bbfd46"

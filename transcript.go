@@ -98,8 +98,8 @@ func (t Transcript) MarshalJSON() ([]byte, error) {
 		return t.Raw, nil
 	}
 	return json.Marshal(struct {
-		ID              string  `json:"id"`
-		Title           string  `json:"title"`
+		ID              string `json:"id"`
+		Title           string `json:"title"`
 		DurationSeconds int    `json:"duration_seconds"`
 	}{t.ID, t.Title, t.DurationSeconds})
 }

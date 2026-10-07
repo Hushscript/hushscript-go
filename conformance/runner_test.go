@@ -19,7 +19,6 @@ import (
 	"time"
 
 	hushscript "github.com/Hushscript/hushscript-go"
-	"github.com/Hushscript/hushscript-go/generated"
 	"github.com/Hushscript/hushscript-go/internal/goldens"
 	"github.com/Hushscript/hushscript-go/internal/probe"
 )
@@ -62,18 +61,21 @@ type errorExpect struct {
 // token of the prior call's error.
 type env struct {
 	client *hushscript.Client
-	media  func(ctx context.Context, name string) (string, error)
+	// options configure the calls that build their own client (agent signup and claim).
+	options []hushscript.Option
+	media   func(ctx context.Context, name string) (string, error)
 	// file downloads a file the mock serves, by its path under the conformance checkout.
 	file  func(ctx context.Context, path string) ([]byte, error)
 	token string
 }
 
-// operations maps call.op to what the SDK does. An op that is not here is reported as skipped,
-// which is scaffold-only (the contract says to fail it once every op exists).
+// operations maps call.op to what the SDK does. An op that is not here fails the scenario under
+// CONFORMANCE_STRICT=1, which `just ci` sets (the contract: a runner must not skip).
 var operations = map[string]operation{
 	"balance":         {run: balance},
-	"claim":           {run: claim, errorsOnly: true},
-	"rotate":          {run: rotate, errorsOnly: true},
+	"buy":             {run: buy},
+	"claim":           {run: claim},
+	"rotate":          {run: rotate},
 	"listTranscripts": {run: listTranscripts},
 	"transcribe":      {run: transcribe},
 	"resume":          {run: resume},
@@ -81,34 +83,50 @@ var operations = map[string]operation{
 	"format":          {run: formatGoldens, direct: true},
 }
 
-// operation is one mapped call.op. errorsOnly marks a call that goes through the generated client for
-// now: it can prove how failures surface, but not what a success returns, so scenarios that expect a
-// result stay skipped until the friendly layer exists.
+// operation is one mapped call.op.
 type operation struct {
-	run        func(context.Context, *env, map[string]any) (map[string]any, error)
-	errorsOnly bool
+	run func(context.Context, *env, map[string]any) (map[string]any, error)
 	// direct marks a call that needs no virtual time and sends no API request: the driver stays out of
 	// it, so its downloads from the mock cannot look like a stalled SDK.
 	direct bool
 }
 
-var errNotMappedYet = errors.New("the friendly layer for this call does not exist yet")
-
+// claim claims the seeded signup with the SDK configured like the client of the scenario: the same
+// mock, clock and counting transport.
 func claim(ctx context.Context, e *env, args map[string]any) (map[string]any, error) {
 	signupID, _ := args["signupId"].(string)
 	secret, _ := args["claimSecret"].(string)
-	_, err := e.client.API().ClaimAgentAccountWithResponse(ctx, signupID, generated.ClaimAgentAccountJSONRequestBody{ClaimSecret: secret})
+	got, err := hushscript.AgentClaim(ctx, signupID, secret, e.options...)
 	if err != nil {
 		return nil, err
 	}
-	return nil, errNotMappedYet
+	scopes := make([]any, len(got.Scopes))
+	for i, scope := range got.Scopes {
+		scopes[i] = scope
+	}
+	return map[string]any{"token": got.Token, "userId": got.UserID, "scopes": scopes, "seconds": float64(got.Balance.Seconds)}, nil
 }
 
 func rotate(ctx context.Context, e *env, _ map[string]any) (map[string]any, error) {
-	if _, err := e.client.API().RotateAgentCredentialsWithResponse(ctx); err != nil {
+	got, err := e.client.Agent.RotateToken(ctx)
+	if err != nil {
 		return nil, err
 	}
-	return nil, errNotMappedYet
+	scopes := make([]any, len(got.Scopes))
+	for i, scope := range got.Scopes {
+		scopes[i] = scope
+	}
+	return map[string]any{"token": got.Token, "tokenId": got.TokenID, "scopes": scopes}, nil
+}
+
+// buy reports the purchase like a balance: {seconds, minutes}.
+func buy(ctx context.Context, e *env, args map[string]any) (map[string]any, error) {
+	pack, _ := args["pack"].(string)
+	got, err := e.client.Buy(ctx, pack, nil)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"seconds": float64(got.Seconds), "minutes": float64(got.Minutes)}, nil
 }
 
 // listTranscripts drains Transcripts.List and reports {count, firstId, lastId}.
@@ -234,15 +252,18 @@ func resume(ctx context.Context, e *env, args map[string]any) (map[string]any, e
 	return transcriptResult(got)
 }
 
-// refusedByItsBytes is the one file of durations.json the SDK must not sniff: a WebM renamed to .mp3,
-// which the unsupported-media scenario requires it to refuse. Any other file that sniffs as unknown is
-// a failure.
-const refusedByItsBytes = "webm-renamed.mp3"
-
-// probeDurations runs the SDK's duration probe over every file of durations.json: each must probe to
-// its listed duration, except refusedByItsBytes, which must be refused by its bytes.
+// probeDurations runs the SDK's sniffer and duration probe over every file of durations.json. A file
+// named in args["refuse"] must be refused by its bytes and never probed; every other file must probe
+// to its listed duration, so any other unknown sniff is a failure.
 func probeDurations(ctx context.Context, e *env, args map[string]any) (map[string]any, error) {
 	tolerance, _ := args["toleranceSeconds"].(float64)
+	refuse := map[string]bool{}
+	names, _ := args["refuse"].([]any)
+	for _, name := range names {
+		if text, ok := name.(string); ok {
+			refuse[text] = true
+		}
+	}
 	path, err := e.media(ctx, "media/durations.json")
 	if err != nil {
 		return nil, err
@@ -256,19 +277,27 @@ func probeDurations(ctx context.Context, e *env, args map[string]any) (map[strin
 		return nil, err
 	}
 	failures := []any{}
+	checked, refused := 0, 0
 	for name, want := range expected {
 		file, openErr := e.media(ctx, "media/"+name)
 		if openErr != nil {
 			return nil, openErr
 		}
 		got, probeErr := probeFile(file)
-		switch {
-		case errors.Is(probeErr, errUnsupported) && name == refusedByItsBytes:
-		case probeErr != nil, got-want > tolerance, want-got > tolerance, math.Ceil(got) < want-1e-6:
+		if refuse[name] {
+			if errors.Is(probeErr, errUnsupported) {
+				refused++
+			} else {
+				failures = append(failures, map[string]any{"file": name, "expected": "refused", "got": got})
+			}
+			continue
+		}
+		checked++
+		if probeErr != nil || got-want > tolerance || want-got > tolerance || math.Ceil(got) < want-1e-6 {
 			failures = append(failures, map[string]any{"file": name, "expected": want, "got": got})
 		}
 	}
-	return map[string]any{"checked": float64(len(expected)), "failures": failures}, nil
+	return map[string]any{"checked": float64(checked), "refused": float64(refused), "failures": failures}, nil
 }
 
 var errUnsupported = errors.New("the format is not supported")
@@ -367,7 +396,7 @@ func runScenario(parent context.Context, t *testing.T, mock *mockClient, files *
 	if scenario.Call.Prior != nil {
 		priorOp, priorKnown = operations[scenario.Call.Prior.Op]
 	}
-	if !known || !priorKnown || (mapped.errorsOnly && scenario.Expect.Error == nil) {
+	if !known || !priorKnown {
 		// The contract says a runner must not skip. Until every op is mapped a skip passes, and
 		// CONFORMANCE_STRICT=1 turns it into the failure the contract asks for.
 		if os.Getenv("CONFORMANCE_STRICT") == "1" {
@@ -381,16 +410,16 @@ func runScenario(parent context.Context, t *testing.T, mock *mockClient, files *
 
 	clock := &virtualClock{}
 	transport := &countingTransport{inner: http.DefaultTransport}
-	client, err := hushscript.New(
-		hushscript.WithToken(testToken),
+	options := []hushscript.Option{
 		hushscript.WithBaseURL(mockBaseURL),
 		hushscript.WithClock(clock),
 		hushscript.WithHTTPClient(&http.Client{Transport: transport}),
-	)
+	}
+	client, err := hushscript.New(append([]hushscript.Option{hushscript.WithToken(testToken)}, options...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &env{client: client, media: files.fetch, file: mock.file}
+	e := &env{client: client, options: options, media: files.fetch, file: mock.file}
 	drive := &driver{mock: mock, clock: clock, transport: transport}
 
 	if prior := scenario.Call.Prior; prior != nil {

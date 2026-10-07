@@ -20,7 +20,7 @@ const (
 	claimHint  = "The claim may have succeeded. Retrying will fail with agent_claim_invalid. If you have no token, contact support with the signup id."
 	rotateHint = "The old token may already be revoked. Try a request with it; if it fails, the new token was lost and the account needs support."
 
-	newTokenText = "hsr1:eu:pat.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	newTokenText = "hsr1:eu:pat.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" //nolint:gosec // a made-up token
 )
 
 func signupAnswer() step {
@@ -35,7 +35,9 @@ func rotateAnswer(expires string) step {
 	return ok(`{"pat":"` + newTokenText + `","pat_id":"pat_2","scopes":["transcribe"],"expires_at":` + expires + `}`)
 }
 
-func tokenless(srv *routeServer) []Option { return []Option{WithBaseURL(srv.URL), WithClock(newFakeClock())} }
+func tokenless(srv *routeServer) []Option {
+	return []Option{WithBaseURL(srv.URL), WithClock(newFakeClock())}
+}
 
 func request() AgentSignupRequest {
 	return AgentSignupRequest{
@@ -114,7 +116,7 @@ func TestSignupIsNeverRetriedAndALostAnswerIsOutcomeUnknownWithoutAHint(t *testi
 			t.Errorf("503: %+v", e)
 		}
 	}
-	for name, body := range map[string]string{"empty": `{}`, "no secret": `{"signup_id":"s","checkout_url":"u","amount":1,"currency":"usd","expires_at":1}`} {
+	for name, body := range map[string]string{"empty": `{}`, "no secret": `{"signup_id":"s","checkout_url":"u","amount":1,"currency":"usd","expires_at":1}`} { //nolint:gosec // test data
 		srv := newRouteServer(t, func(recorded, int) step { return ok(body) })
 		_, err := AgentSignup(context.Background(), request(), tokenless(srv)...)
 		if e := wantCode(t, err, KindAPI, "bad_response"); e.Status != 200 {
@@ -325,9 +327,9 @@ func TestALostRotateIsOutcomeUnknownWithTheRotateHintAndTheOldTokenStays(t *test
 // still becomes the client's token, and is kept on the error.
 func TestATokenInAnUnusableRotationAnswerIsKeptOnTheErrorAndSent(t *testing.T) {
 	for name, answer := range map[string]step{
-		"no pat_id": ok(`{"pat":"` + newTokenText + `","scopes":[]}`),
+		"no pat_id":         ok(`{"pat":"` + newTokenText + `","scopes":[]}`),
 		"scopes not a list": ok(`{"pat":"` + newTokenText + `","pat_id":"p","scopes":"transcribe"}`),
-		"202":       {status: 202, body: `{"pat":"` + newTokenText + `","pat_id":"p","scopes":[]}`},
+		"202":               {status: 202, body: `{"pat":"` + newTokenText + `","pat_id":"p","scopes":[]}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := newRouteServer(t, func(rec recorded, _ int) step {
@@ -358,7 +360,7 @@ func TestATokenInAnUnusableRotationAnswerIsKeptOnTheErrorAndSent(t *testing.T) {
 }
 
 func TestAClaimWithATokenButNoUserOrScopesKeepsTheTokenOnTheError(t *testing.T) {
-	for name, body := range map[string]string{
+	for name, body := range map[string]string{ //nolint:gosec // made-up tokens
 		"only the token":   `{"pat":"` + newTokenText + `"}`,
 		"scopes mistyped":  `{"pat":"` + newTokenText + `","user_id":"u","scopes":7,"balance_seconds":0}`,
 		"balance mistyped": `{"pat":"` + newTokenText + `","user_id":"u","scopes":[],"balance_seconds":"0"}`,
@@ -386,8 +388,8 @@ func TestEveryFriendlyReadRefusesAnEmptyObjectAndAWrongTypedFieldAsBadResponse(t
 			_, err := drain(c.Billing.Transactions(context.Background()))
 			return err
 		},
-		"ledger": func(c *Client) error { _, err := drain(c.Billing.Ledger(context.Background())); return err },
-		"holds":  func(c *Client) error { _, err := drain(c.Billing.Holds(context.Background())); return err },
+		"ledger":  func(c *Client) error { _, err := drain(c.Billing.Ledger(context.Background())); return err },
+		"holds":   func(c *Client) error { _, err := drain(c.Billing.Holds(context.Background())); return err },
 		"balance": func(c *Client) error { _, err := c.Balance(context.Background()); return err },
 	}
 	bodies := map[string][]string{

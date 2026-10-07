@@ -80,9 +80,9 @@ func (s *routeServer) to(route string) []recorded {
 	return out
 }
 
-func (s *routeServer) client(t *testing.T, opts ...Option) *Client {
+func (s *routeServer) client(t *testing.T) *Client {
 	t.Helper()
-	return newTestClient(t, s.URL, newFakeClock(), opts...)
+	return newTestClient(t, s.URL, newFakeClock())
 }
 
 const (
@@ -427,8 +427,8 @@ func TestCardsAndTheDefaultCardAndTheAddCardURL(t *testing.T) {
 	if cards.Cards[1].Email != "a@b.c" || cards.Cards[1].FastCheckoutEligible {
 		t.Errorf("second = %+v", cards.Cards[1])
 	}
-	if err := c.Billing.SetDefaultCard(context.Background(), "pm_2"); err != nil {
-		t.Fatal(err)
+	if setErr := c.Billing.SetDefaultCard(context.Background(), "pm_2"); setErr != nil {
+		t.Fatal(setErr)
 	}
 	if got := api.to("POST /v1/billing/cards/default")[0].body; got != `{"payment_method_id":"pm_2"}` {
 		t.Errorf("body = %s", got)
