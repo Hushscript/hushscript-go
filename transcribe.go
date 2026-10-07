@@ -206,6 +206,27 @@ func (c Client) TranscribeReader(ctx context.Context, r io.ReaderAt, size int64,
 	return p.transcribe(ctx, &fileSource{r: r, size: size}, opts)
 }
 
+// TranscribeStream is Transcribe for a forward-only reader of exactly size bytes, such as a pipe or a
+// network body. The SDK cannot seek it or probe it, so opts.DurationSeconds is required, and the size
+// must be exact: a reader that holds more or fewer bytes is an UploadError with code
+// stream_size_mismatch, before the upload is completed. Parts are read one at a time, in order, with
+// at most one part in memory. Canceling ctx is noticed between parts; close the reader to interrupt a
+// read that is blocked. The SDK never closes r.
+func (c Client) TranscribeStream(ctx context.Context, r io.Reader, size int64, opts *TranscribeOptions) (*Transcript, error) {
+	p, err := c.pipeline()
+	if err != nil {
+		return nil, err
+	}
+	red := p.cfg.redactor()
+	if r == nil {
+		return nil, invalidOption(red, "The reader cannot be nil.", nil)
+	}
+	if size <= 0 {
+		return nil, invalidOption(red, "The size must be the exact number of bytes in the reader, above 0.", nil)
+	}
+	return p.transcribe(ctx, newStreamSource(r, size), opts)
+}
+
 // run is the state of one transcribe or resume call that its stages share.
 type run struct {
 	core        *core
@@ -301,6 +322,9 @@ func (c *core) transcribe(ctx context.Context, src *fileSource, opts *Transcribe
 	if err != nil {
 		return nil, err
 	}
+	if src.stream != nil && opts.DurationSeconds == 0 {
+		return nil, invalidOption(red, "A stream input needs DurationSeconds: it cannot be probed.", nil)
+	}
 	declared, err := c.preflight(ctx, src, opts)
 	if err != nil {
 		return nil, err
@@ -335,7 +359,16 @@ func (c *core) transcribe(ctx context.Context, src *fileSource, opts *Transcribe
 // It returns the duration to declare: the probed or supplied seconds, rounded up.
 func (c *core) preflight(ctx context.Context, src *fileSource, opts *TranscribeOptions) (int, error) {
 	red := c.cfg.redactor()
-	format := probe.SniffAt(src.r, src.size)
+	var format probe.Format
+	if src.stream != nil {
+		head, err := src.stream.takeHead(src.size)
+		if err != nil {
+			return 0, fileUnreadable(red, "The stream could not be read.", err)
+		}
+		format = probe.SniffAt(bytes.NewReader(head), int64(len(head)))
+	} else {
+		format = probe.SniffAt(src.r, src.size)
+	}
 	if format == probe.FormatUnknown {
 		return 0, newSDKError(KindUnsupportedMedia, "unsupported_media", "The file is not in a supported audio format.", nil, red, hintInputs{})
 	}

@@ -49,6 +49,22 @@ transcript, err := client.Transcribe(ctx, "meeting.mp3", &hushscript.TranscribeO
 })
 ```
 
+## Inputs
+
+`Transcribe` takes a path. `TranscribeReader` takes an `io.ReaderAt` and its exact size. For a
+forward-only input (a pipe, a network body) use `TranscribeStream`: it reads one part at a time, in
+order, and needs the exact `size` and `DurationSeconds`, because a stream can be neither rewound nor
+probed.
+
+```go
+transcript, err := client.TranscribeStream(ctx, resp.Body, resp.ContentLength, &hushscript.TranscribeOptions{
+	DurationSeconds: 1800,
+})
+```
+
+`Resume` takes the same kinds: `ResumeOptions.Path`, `Reader` with `Size`, or `Stream`, which is read from
+where it stands and must hold the size the resume token records.
+
 ## Check my balance
 
 ```go

@@ -7,11 +7,43 @@ import (
 	"os"
 )
 
-// fileSource is the bytes of one upload: a random-access reader of exactly size bytes.
+// streamHeadBytes is how much of the start of a forward-only stream is buffered to recognize its format.
+const streamHeadBytes = 4096
+
+// fileSource is the bytes of one upload: a random-access reader of exactly size bytes, or, when
+// stream is set, a forward-only reader of exactly size bytes that is read once, in order.
 type fileSource struct {
 	r      io.ReaderAt
 	size   int64
 	closer io.Closer
+	stream *streamReader
+}
+
+// streamReader is a forward-only input. Its head is read once, for the format sniff, and served again
+// as the start of the first part, so at most one part (plus the head) is in memory.
+type streamReader struct {
+	r        io.Reader
+	head     []byte
+	headRead bool
+	pos      int64
+}
+
+func newStreamSource(r io.Reader, size int64) *fileSource {
+	return &fileSource{size: size, stream: &streamReader{r: r}}
+}
+
+// takeHead reads the first bytes of the stream, once. A stream that ends sooner than its size says is
+// not an error here: the upload reports the size mismatch.
+func (s *streamReader) takeHead(size int64) ([]byte, error) {
+	if !s.headRead {
+		buf := make([]byte, min(size, streamHeadBytes))
+		n, err := io.ReadFull(s.r, buf)
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, err
+		}
+		s.head, s.headRead = buf[:n], true
+	}
+	return s.head, nil
 }
 
 // fileUnreadable is the PreflightError for a Path that cannot be opened, stat'd or read as a file; the
@@ -51,6 +83,9 @@ func (s *fileSource) sizeMismatch(red redactor, detail string) *Error {
 // readPart fills buf with the bytes at off. A source with fewer bytes than its size is a size
 // mismatch; any other read failure is its own error.
 func (s *fileSource) readPart(buf []byte, off int64, red redactor) error {
+	if s.stream != nil {
+		return s.readStreamPart(buf, off, red)
+	}
 	got, err := s.r.ReadAt(buf, off)
 	if got == len(buf) {
 		if err == nil || errors.Is(err, io.EOF) {
@@ -64,9 +99,40 @@ func (s *fileSource) readPart(buf []byte, off int64, red redactor) error {
 	return newSDKError(KindUpload, "source_read_failed", "The file could not be read.", err, red, hintInputs{})
 }
 
+// readStreamPart fills buf from a forward-only stream, which can only be read from where it stands.
+func (s *fileSource) readStreamPart(buf []byte, off int64, red redactor) error {
+	st := s.stream
+	if off != st.pos {
+		return newSDKError(KindUpload, "stream_not_seekable", "A stream can only be uploaded in order, one part at a time.", nil, red, hintInputs{})
+	}
+	filled := 0
+	if off < int64(len(st.head)) {
+		filled = copy(buf, st.head[off:])
+	}
+	got, err := io.ReadFull(st.r, buf[filled:])
+	st.pos += int64(filled + got)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF):
+		return s.sizeMismatch(red, "it ended early")
+	}
+	return newSDKError(KindUpload, "source_read_failed", "The file could not be read.", err, red, hintInputs{})
+}
+
 // checkNoMoreBytes fails when the source holds a byte past its declared size.
 func (s *fileSource) checkNoMoreBytes(red redactor) error {
 	var one [1]byte
+	if s.stream != nil {
+		got, err := io.ReadFull(s.stream.r, one[:])
+		if got > 0 {
+			return s.sizeMismatch(red, "it holds more bytes")
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return newSDKError(KindUpload, "source_read_failed", "The file could not be read.", err, red, hintInputs{})
+		}
+		return nil
+	}
 	got, err := s.r.ReadAt(one[:], s.size)
 	if got > 0 {
 		return s.sizeMismatch(red, "it holds more bytes")
