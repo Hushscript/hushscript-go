@@ -361,6 +361,26 @@ anything else, convert it first:
 ffmpeg -i input -vn -c:a libopus output.opus
 ```
 
+## Configuration
+
+`New` takes functional options:
+
+| Option           | Env var               | Default                                                                      |
+| ---------------- | --------------------- | ---------------------------------------------------------------------------- |
+| `WithToken`      | `HUSHSCRIPT_TOKEN`    | none                                                                         |
+| `WithBaseURL`    | `HUSHSCRIPT_BASE_URL` | `https://api.hushscript.com`                                                 |
+| `WithTimeout`    | none                  | 60 s per request attempt                                                     |
+| `WithMaxRetries` | none                  | 3 (0 turns retries off)                                                      |
+| `WithLogLevel`   | `HUSHSCRIPT_LOG`      | `off` (`debug` logs one metadata line per request attempt to standard error) |
+| `WithLogger`     | none                  | none; an `*slog.Logger` that receives the debug lines instead                |
+| `WithHTTPClient` | none                  | a plain `http.Client` that never follows redirects                           |
+| `WithClock`      | none                  | the system clock; pass a `Clock` in tests                                    |
+
+An explicit option beats its environment variable. The base URL must be `https://`, or `http://` to
+`localhost`, `127.0.0.1` or `[::1]`, with no path. Each upload part has its own 300 s timeout, which
+you cannot change. `WithHTTPClient` takes a shallow copy of the `*http.Client` at `New`, so
+reassigning its fields afterwards does not reach the SDK.
+
 ## Privacy
 
 The SDK sends no telemetry. The only client identification is the `User-Agent` header
@@ -378,8 +398,7 @@ response, err := client.API().GetAccountWithResponse(ctx)
 ```
 
 `Job.Options` and `UploadLimits` are typed, so a key the API adds to them later is not kept there;
-`client.API()` returns the whole body. `WithHTTPClient` takes a shallow copy of the `*http.Client` at
-`New`, so reassigning its fields afterwards does not reach the SDK.
+`client.API()` returns the whole body.
 
 ## Server only
 
