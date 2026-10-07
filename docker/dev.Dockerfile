@@ -18,7 +18,10 @@ WORKDIR /work
 FROM base AS deps
 COPY go.mod go.sum ./
 COPY tools/go.mod tools/go.sum tools/
-RUN go mod download && (cd tools && go mod download)
+RUN go mod download
+WORKDIR /work/tools
+RUN go mod download
+WORKDIR /work
 
 FROM base AS dev
 COPY --from=deps /go/pkg/mod /go/pkg/mod
