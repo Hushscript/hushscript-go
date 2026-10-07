@@ -612,7 +612,6 @@ func TestAPartURLsAnswerWithoutUsableRowsIsBadResponseAndStoresNothing(t *testin
 	const route = "GET /v1/uploads/j1/part-urls"
 	for name, body := range map[string]string{
 		"empty object":         `{}`,
-		"null":                 `null`,
 		"array":                `[]`,
 		"part_urls null":       `{"part_urls":null}`,
 		"empty row":            `{"part_urls":[{}]}`,
@@ -645,6 +644,39 @@ func TestAPartURLsAnswerWithoutUsableRowsIsBadResponseAndStoresNothing(t *testin
 	pages := newPartPages(srv.client(t).core, "j1", &uploadPlan{next: 1})
 	if err := pages.load(context.Background(), 1); err != nil || len(pages.pages) != 1 {
 		t.Errorf("a complete answer: %v, %d pages", err, len(pages.pages))
+	}
+}
+
+// A JSON null page is the API saying direct upload is not available for the job: the parts go through
+// the API, as they do for an empty list.
+func TestANullPartURLsPageMeansTheJobTakesProxiedPartsOnly(t *testing.T) {
+	for name, body := range map[string]string{"null": `null`, "null with whitespace": " \n null \n", "empty list": `{"part_urls":[]}`} {
+		t.Run(name, func(t *testing.T) {
+			srv := newRouteServer(t, func(recorded, int) step { return ok(body) })
+			pages := newPartPages(srv.client(t).core, "j1", &uploadPlan{next: 1})
+			if err := pages.load(context.Background(), 1); err != nil {
+				t.Fatal(err)
+			}
+			url, direct, err := pages.urlFor(context.Background(), 1)
+			if err != nil || direct || url != "" || len(pages.pages) != 0 {
+				t.Errorf("url %q, direct %v, %d pages, %v", url, direct, len(pages.pages), err)
+			}
+		})
+	}
+	r := newRig(t)
+	r.api.size = int64(len(r.wav))
+	r.api.setHook(func(s *seen) (int, string, bool) {
+		switch s.route {
+		case "create":
+			return 200, `{"job_id":"job_1","state":"uploading","balance_seconds":1,"held_seconds":1,"funding":"personal","limits":{"active_jobs":1,"max_active_jobs":50,"max_daily_seconds":1,"used_today_seconds":0},"upload":{"part_size_bytes":161000,"total_parts":4,"part_urls":[],"next_part_number":1}}`, true
+		case "partUrls":
+			return 200, `null`, true
+		}
+		return 0, "", false
+	})
+	mustTranscribe(t, r, nil)
+	if r.api.count("partUrls") != 1 || r.api.count("r2") != 0 || r.api.count("part") != 4 || r.api.count("complete") != 1 {
+		t.Errorf("part-urls %d, direct %d, proxied %d, complete %d", r.api.count("partUrls"), r.api.count("r2"), r.api.count("part"), r.api.count("complete"))
 	}
 }
 

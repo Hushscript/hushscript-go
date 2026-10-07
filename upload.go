@@ -91,7 +91,11 @@ func (r *run) upload(parent context.Context, plan *uploadPlan) (string, error) {
 	beat := c.startHeartbeat(ctx, cancel, r.state.JobID)
 	state, err := r.sendAndComplete(ctx, plan)
 	cancel()
-	if failure := beat.stop(); failure != nil {
+	failure := beat.stop()
+	if raised, isPanic := err.(*callbackPanic); isPanic { //nolint:errorlint // sendAndComplete returns it unwrapped
+		panic(raised.value) // the caller's own callback panicked on an upload worker: its value, unchanged, on the caller's goroutine
+	}
+	if failure != nil {
 		// A refused token ended the upload; whatever the cancellation then broke is a symptom.
 		return "", failure
 	}
@@ -164,6 +168,32 @@ type uploader struct {
 
 	mu    sync.Mutex
 	etags map[int]string
+
+	// stop cancels the upload's workers; send sets it before any worker starts.
+	stop context.CancelFunc
+	// panicked holds the first panic a caller's OnProgress raised on a worker, for upload to re-raise.
+	panicked atomic.Pointer[callbackPanic]
+}
+
+// callbackPanic carries the value a caller's callback panicked with from an upload worker, where
+// nobody can recover it, back to the goroutine that made the call. The SDK never recovers anything
+// else, and never wraps the value.
+type callbackPanic struct{ value any }
+
+func (*callbackPanic) Error() string { return "a callback panicked" }
+
+// progress runs the caller's OnProgress under the lock that keeps its reports in order. A panic in it
+// stops the upload and is kept for upload to raise again; later reports are not delivered.
+func (u *uploader) progress(onProgress func(Progress), report Progress) {
+	defer func() {
+		if value := recover(); value != nil {
+			u.panicked.CompareAndSwap(nil, &callbackPanic{value: value})
+			u.stop()
+		}
+	}()
+	if u.panicked.Load() == nil {
+		onProgress(report)
+	}
 }
 
 func (c *core) newUploader(r *run, plan *uploadPlan) (*uploader, error) {
@@ -193,7 +223,7 @@ func (c *core) newUploader(r *run, plan *uploadPlan) (*uploader, error) {
 		defer sentMu.Unlock()
 		sent += n
 		if r.onProgress != nil {
-			r.onProgress(Progress{Stage: StageUploading, Percent: int(sent * 100 / r.src.size), BytesSent: sent, BytesTotal: r.src.size})
+			u.progress(r.onProgress, Progress{Stage: StageUploading, Percent: int(sent * 100 / r.src.size), BytesSent: sent, BytesTotal: r.src.size})
 		}
 	}
 	return u, nil
@@ -205,6 +235,7 @@ func (c *core) newUploader(r *run, plan *uploadPlan) (*uploader, error) {
 func (u *uploader) send(parent context.Context) ([]completedPart, error) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	u.stop = cancel
 	var wg sync.WaitGroup
 	var once sync.Once
 	var first error
@@ -221,6 +252,9 @@ func (u *uploader) send(parent context.Context) ([]completedPart, error) {
 		}()
 	}
 	wg.Wait()
+	if raised := u.panicked.Load(); raised != nil {
+		return nil, raised
+	}
 	if first != nil {
 		return nil, first
 	}
@@ -611,6 +645,13 @@ func (p *partPages) load(ctx context.Context, start int) error {
 	response, err := p.core.api.GetUploadPartUrlsWithResponse(ctx, p.job, &generated.GetUploadPartUrlsParams{Start: &start})
 	if err != nil {
 		return p.core.readFailed(err, route)
+	}
+	if bytes.Equal(bytes.TrimSpace(response.Body), []byte("null")) && response.StatusCode() >= http.StatusOK && response.StatusCode() < http.StatusMultipleChoices {
+		// A JSON null page says direct upload is not available for this job: its parts go through the API.
+		p.mu.Lock()
+		p.direct = false
+		p.mu.Unlock()
+		return nil
 	}
 	parsed := decodedBody(response.JSON200, response.HTTPResponse, response.Body)
 	if failure := p.core.unusable(route, response.HTTPResponse, parsed != nil, response.Body, "part_urls"); failure != nil {

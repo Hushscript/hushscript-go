@@ -296,6 +296,11 @@ An error returned after an upload started, or after a purchase was sent, carries
 once the job exists it carries `ResumeToken` too. Pass the token to `client.Resume` to carry on
 without a second charge.
 
+A failure of the SDK's own after a request was sent, one that fits none of the kinds above, is a
+`KindAPI` error with the code `unexpected_error` and `Status` 0; the original rides along as its
+cause, redacted. `OnProgress` and `OnResumeToken` cannot return an error: a panic in one is yours, and
+leaves the call with the value you raised, never recovered or wrapped.
+
 ## What the SDK does for you
 
 - **Checks before it spends.** It sniffs the format from the file's bytes, probes the duration,
