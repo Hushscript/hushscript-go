@@ -222,7 +222,7 @@ func newFakeAPI(t *testing.T, clock Clock) *fakeAPI {
 		t: t, clock: clock, jobs: map[string]string{}, parts: map[int]partRecord{},
 		partSize: 256_000, pageSize: 16, balance: 36000, maxDaily: 100000,
 		completeAs: "queued", jobStates: []string{"processing", "done"},
-		transcript: `{"id":"tr_1","title":"T","language_detected":"en","duration_seconds":20,"body":{"version":1,"original":{"utterances":[{"speaker":"A","start_ms":0,"end_ms":1000,"text":"hi"}]},"translations":{}},"x_unknown_field":{"nested":true}}`,
+		transcript: `{"id":"tr_1","title":"T","language_detected":"en","duration_seconds":20,"created_at":1,"updated_at":2,"body":{"version":1,"original":{"utterances":[{"speaker":"A","start_ms":0,"end_ms":1000,"text":"hi"}]},"translations":{}},"x_unknown_field":{"nested":true}}`,
 	}
 	f.Server = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.Close)

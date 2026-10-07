@@ -24,7 +24,7 @@ func (c *core) readJob(ctx context.Context, id string) (*Job, error) {
 	if err != nil {
 		return nil, c.readFailed(err, route)
 	}
-	if failure := c.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "id", "state"); failure != nil {
+	if failure := c.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "id", "state", "created_at"); failure != nil {
 		return nil, failure
 	}
 	var body jobBody
@@ -66,6 +66,22 @@ func (c *core) unusable(route string, response *http.Response, decoded bool, bod
 		return c.badResponse(route, status)
 	}
 	return nil
+}
+
+// rowsHave reports whether the array at key holds only objects that have every field, none of them
+// null: a row without one would otherwise decode into a silent zero.
+func rowsHave(body []byte, key string, fields ...string) bool {
+	var root map[string]json.RawMessage
+	var rows []json.RawMessage
+	if json.Unmarshal(body, &root) != nil || json.Unmarshal(root[key], &rows) != nil {
+		return false
+	}
+	for _, row := range rows {
+		if !hasFields(row, fields) {
+			return false
+		}
+	}
+	return true
 }
 
 // hasFields reports whether body is a JSON object holding every path, none of them null.

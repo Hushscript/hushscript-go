@@ -6,7 +6,8 @@ import (
 	"time"
 )
 
-// UploadLimits are the caller's current upload admission limits.
+// UploadLimits are the caller's current upload admission limits. The fields are typed, so a key the
+// API adds to limits later is not kept here; Client.API returns the whole body.
 type UploadLimits struct {
 	// MaxDailySeconds is the daily transcription cap, in seconds.
 	MaxDailySeconds int

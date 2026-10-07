@@ -22,7 +22,7 @@ func TestRefusesConstructionWithoutATokenAndSaysWhereToGetOne(t *testing.T) {
 		t.Errorf("message %q does not name the variable", apiErr.Message)
 	}
 	wantHint := "Set HUSHSCRIPT_TOKEN or pass a token. Create one in the Hushscript app: " +
-		"Account → Connected apps (app.hushscript.com/account/mcp)."
+		"Account → MCP (app.hushscript.com/account/mcp)."
 	if apiErr.Hint != wantHint {
 		t.Errorf("hint = %q, want the spec section 3 text", apiErr.Hint)
 	}

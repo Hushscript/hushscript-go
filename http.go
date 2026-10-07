@@ -37,13 +37,12 @@ var errResponseTooLarge = errors.New("the response is larger than the SDK reads 
 type doer struct {
 	cfg   config
 	pacer *pacer
-	red   redactor
 	// limit is the most a response may hold in memory.
 	limit int64
 }
 
 func newDoer(cfg config) *doer {
-	return &doer{cfg: cfg, pacer: newPacer(cfg.clock), red: cfg.redactor(), limit: maxResponseBytes}
+	return &doer{cfg: cfg, pacer: newPacer(cfg.clock), limit: maxResponseBytes}
 }
 
 // maxKeyPeekBytes bounds how much of an upload-create body is read to look for its idempotency key.
@@ -170,7 +169,7 @@ func (d *doer) Do(req *http.Request) (*http.Response, error) {
 			d.cfg.logAttempt(ctx, record)
 			return out.resp, nil
 		}
-		failure := errorFromResponse(out.resp.StatusCode, out.resp.Header, out.body, req.Method, req.URL.EscapedPath(), d.red)
+		failure := errorFromResponse(out.resp.StatusCode, out.resp.Header, out.body, req.Method, req.URL.EscapedPath(), d.cfg.redactor())
 		retry, delay := d.statusRetry(class, &state, failure, out.resp.Header, budget)
 		record.retryDelay = delay
 		d.cfg.logAttempt(ctx, record)
@@ -255,8 +254,12 @@ func (d *doer) attempt(parent context.Context, req *http.Request) outcome {
 	// The token goes to the API host only; direct-to-storage part uploads carry their own signature,
 	// and never the token, even when the storage URL happens to share the API's origin.
 	direct := isDirectStorage(parent)
-	if !direct && strings.EqualFold(r.URL.Host, d.cfg.baseHost) && r.URL.Scheme == d.cfg.baseScheme {
-		r.Header.Set("Authorization", "Bearer "+d.cfg.token.reveal())
+	token := ""
+	if d.cfg.tokens != nil {
+		token = d.cfg.tokens.get() // read per attempt: a rotation applies to retries already queued
+	}
+	if !direct && token != "" && strings.EqualFold(r.URL.Host, d.cfg.baseHost) && r.URL.Scheme == d.cfg.baseScheme {
+		r.Header.Set("Authorization", "Bearer "+token)
 	} else {
 		r.Header.Del("Authorization")
 	}
@@ -342,7 +345,7 @@ func (d *doer) statusRetry(class retryClass, state *retryState, failure *Error, 
 }
 
 func (d *doer) aborted(cause error) *Error {
-	return newSDKError(KindAbort, "aborted", "The request was cancelled.", cause, d.red, hintInputs{})
+	return newSDKError(KindAbort, "aborted", "The request was cancelled.", cause, d.cfg.redactor(), hintInputs{})
 }
 
 // networkFailure is the error for an attempt that got no answer and will not be retried. When the
@@ -356,7 +359,7 @@ func (d *doer) networkFailure(class retryClass, req *http.Request, out outcome) 
 	if errors.Is(out.err, context.DeadlineExceeded) {
 		message = fmt.Sprintf("The request to the Hushscript API timed out after %s.", d.timeoutFor(req.Context()))
 	}
-	return newSDKError(KindNetwork, "network_error", message, out.err, d.red, hintInputs{})
+	return newSDKError(KindNetwork, "network_error", message, out.err, d.cfg.redactor(), hintInputs{})
 }
 
 // outcomeUnknown is the error for a claim, rotate or signup whose request was sent and whose answer
@@ -364,7 +367,7 @@ func (d *doer) networkFailure(class retryClass, req *http.Request, out outcome) 
 // rotate carry the hints of spec section 7.4; signup has none.
 func (d *doer) outcomeUnknown(req *http.Request, cause error) *Error {
 	failure := newSDKError(KindOutcomeUnknown, "outcome_unknown",
-		"The request was sent but no response arrived, so its outcome is unknown.", cause, d.red, hintInputs{})
+		"The request was sent but no response arrived, so its outcome is unknown.", cause, d.cfg.redactor(), hintInputs{})
 	switch path := req.URL.EscapedPath(); {
 	case strings.HasSuffix(path, "/claim"):
 		failure.Hint = claimOutcomeHint

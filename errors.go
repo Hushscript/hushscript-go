@@ -278,8 +278,17 @@ func errorFromResponse(status int, header http.Header, body []byte, method, path
 		e.RetryAfter = wait
 		inputs.retryAfterSeconds = some(float64(wait / time.Second))
 	}
-	e.Hint = r.apply(renderHint(slug, inputs))
+	if slug != "wrong_state" || jobOrUploadPath(path) {
+		e.Hint = r.apply(renderHint(slug, inputs))
+	}
 	return e
+}
+
+// jobOrUploadPath reports whether an escaped request path belongs to a job or upload operation. The
+// wrong_state hint names a job call, so it is attached to those operations only (spec section 9.3).
+func jobOrUploadPath(path string) bool {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	return len(segments) >= 2 && segments[0] == "v1" && (segments[1] == "jobs" || segments[1] == "uploads")
 }
 
 // plainJSON turns json.Number into float64 so callers see ordinary numbers in Details.

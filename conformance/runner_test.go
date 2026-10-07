@@ -203,7 +203,7 @@ func transcriptResult(t *hushscript.Transcript) (map[string]any, error) {
 		return nil, err
 	}
 	return map[string]any{
-		"id": t.ID, "title": t.Title, "language": t.Language, "durationSeconds": t.DurationSeconds,
+		"id": t.ID, "title": t.Title, "language": t.Language, "durationSeconds": float64(t.DurationSeconds),
 		"utteranceCount": float64(len(body.Body.Original.Utterances)), "text": t.Text(nil), "raw": raw,
 	}, nil
 }
