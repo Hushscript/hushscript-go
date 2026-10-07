@@ -1,5 +1,5 @@
 # Every recipe runs in containers; nothing here touches host toolchains.
-# Examples: `just ci`, `just test 1.26`, `CONFORMANCE_CONTEXT=../hushscript-sdk-conformance just conformance`.
+# Examples: `just ci`, `just test 1.27`, `CONFORMANCE_CONTEXT=../hushscript-sdk-conformance just conformance`.
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 export HOST_UID := `id -u`
@@ -17,13 +17,13 @@ shellcheck_image := "koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6f
 gitleaks_image := "ghcr.io/gitleaks/gitleaks:v8.28.0@sha256:cdbb7c955abce02001a9f6c9f602fb195b7fadc1e812065883f695d1eeaba854"
 sandbox := "--rm --init --label sdk.test=1 --cap-drop ALL --read-only --security-opt no-new-privileges --pids-limit 512 --memory 4g --tmpfs /tmp"
 floor := "1.25"
-latest := "1.26"
+latest := "1.27"
 
-# unit tests with the race detector and the coverage floor on Go 1.25 (default) or 1.26; no network beyond the mock (the hint tests read the conformance fixtures: CONFORMANCE_DIR, else CONFORMANCE_CONTEXT, else a clone of the pinned tag)
+# unit tests with the race detector and the coverage floor on Go 1.25 (default) or 1.27; no network beyond the mock (the hint tests read the conformance fixtures: CONFORMANCE_DIR, else CONFORMANCE_CONTEXT, else a clone of the pinned tag)
 test version=floor:
     #!/usr/bin/env bash
     set -euo pipefail
-    {{ if version == "1.25" { "" } else if version == "1.26" { "" } else { error("version must be 1.25 or 1.26") } }}
+    {{ if version == "1.25" { "" } else if version == "1.27" { "" } else { error("version must be 1.25 or 1.27") } }}
     export GO_VERSION={{version}}
     CONFORMANCE_DIR="$(scripts/conformance-dir.sh)"
     export CONFORMANCE_DIR
@@ -35,7 +35,7 @@ test version=floor:
 mutation version=floor:
     #!/usr/bin/env bash
     set -euo pipefail
-    {{ if version == "1.25" { "" } else if version == "1.26" { "" } else { error("version must be 1.25 or 1.26") } }}
+    {{ if version == "1.25" { "" } else if version == "1.27" { "" } else { error("version must be 1.25 or 1.27") } }}
     export GO_VERSION={{version}}
     CONFORMANCE_DIR="$(scripts/conformance-dir.sh)"
     export CONFORMANCE_DIR
@@ -47,7 +47,7 @@ mutation version=floor:
 fuzz version=floor:
     #!/usr/bin/env bash
     set -euo pipefail
-    {{ if version == "1.25" { "" } else if version == "1.26" { "" } else { error("version must be 1.25 or 1.26") } }}
+    {{ if version == "1.25" { "" } else if version == "1.27" { "" } else { error("version must be 1.25 or 1.27") } }}
     export GO_VERSION={{version}}
     trap 'docker compose down --remove-orphans >/dev/null 2>&1 || true' EXIT
     docker compose build mock fuzz
@@ -57,7 +57,7 @@ fuzz version=floor:
 conformance version=floor:
     #!/usr/bin/env bash
     set -euo pipefail
-    {{ if version == "1.25" { "" } else if version == "1.26" { "" } else { error("version must be 1.25 or 1.26") } }}
+    {{ if version == "1.25" { "" } else if version == "1.27" { "" } else { error("version must be 1.25 or 1.27") } }}
     export GO_VERSION={{version}}
     trap 'docker compose down --remove-orphans >/dev/null 2>&1 || true' EXIT
     docker compose build mock conformance
@@ -67,7 +67,7 @@ conformance version=floor:
 examples version=floor:
     #!/usr/bin/env bash
     set -euo pipefail
-    {{ if version == "1.25" { "" } else if version == "1.26" { "" } else { error("version must be 1.25 or 1.26") } }}
+    {{ if version == "1.25" { "" } else if version == "1.27" { "" } else { error("version must be 1.25 or 1.27") } }}
     export GO_VERSION={{version}}
     trap 'docker compose down --remove-orphans >/dev/null 2>&1 || true' EXIT
     docker compose build mock examples
@@ -77,7 +77,7 @@ examples version=floor:
 lint version=floor:
     #!/usr/bin/env bash
     set -euo pipefail
-    {{ if version == "1.25" { "" } else if version == "1.26" { "" } else { error("version must be 1.25 or 1.26") } }}
+    {{ if version == "1.25" { "" } else if version == "1.27" { "" } else { error("version must be 1.25 or 1.27") } }}
     export GO_VERSION={{version}}
     trap 'docker compose down --remove-orphans >/dev/null 2>&1 || true' EXIT
     docker compose build mock lint audit
@@ -97,7 +97,7 @@ lint version=floor:
 build version=floor:
     #!/usr/bin/env bash
     set -euo pipefail
-    {{ if version == "1.25" { "" } else if version == "1.26" { "" } else { error("version must be 1.25 or 1.26") } }}
+    {{ if version == "1.25" { "" } else if version == "1.27" { "" } else { error("version must be 1.25 or 1.27") } }}
     export GO_VERSION={{version}}
     docker build --quiet --target dev --build-arg GO_VERSION={{version}} -f docker/dev.Dockerfile -t "hushscript-go-dev:go{{version}}" .
     user="$(id -u):$(id -g)"
@@ -134,7 +134,7 @@ regen spec="":
     docker compose build regen
     docker compose run --rm ${extra[@]+"${extra[@]}"} regen timeout 600 go run ./scripts ${spec:+"$spec"}
 
-# lint, then test and conformance, then examples and build; no argument runs Go 1.25 and 1.26
+# lint, then test and conformance, then examples and build; no argument runs Go 1.25 and 1.27
 ci version="":
     #!/usr/bin/env bash
     set -euo pipefail

@@ -386,7 +386,7 @@ all three to the GitHub release. `proxy.golang.org` is asked for the new version
 Everything runs in containers; the host needs only `just` and Docker.
 
 ```sh
-just ci        # lint, then test and conformance on Go 1.25 and 1.26, then examples and build
+just ci        # lint, then test and conformance on Go 1.25 and 1.27, then examples and build
 just test      # unit tests with the race detector and the 85% coverage floor
 just examples  # every program in examples/ against the conformance mock
 just regen     # regenerate openapi.json and generated/ from the production spec
