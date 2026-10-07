@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/Hushscript/hushscript-go/generated"
 )
 
 const (
@@ -17,20 +15,6 @@ const (
 	pollFactor  = 1.5
 	pollCeiling = 15 * time.Second
 )
-
-func jobFromAPI(raw *generated.Job) *Job {
-	job := &Job{ID: raw.Id, State: raw.State}
-	if raw.TranscriptId != nil {
-		job.TranscriptID = *raw.TranscriptId
-	}
-	if raw.Error != nil {
-		job.Error = *raw.Error
-	}
-	if raw.FailureKind != nil {
-		job.FailureKind = string(*raw.FailureKind)
-	}
-	return job
-}
 
 func (j *Job) finished() bool { return j.State == "done" || j.State == "failed" }
 
@@ -43,7 +27,11 @@ func (c *core) readJob(ctx context.Context, id string) (*Job, error) {
 	if failure := c.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, "id", "state"); failure != nil {
 		return nil, failure
 	}
-	return jobFromAPI(response.JSON200), nil
+	var body jobBody
+	if json.Unmarshal(response.Body, &body) != nil {
+		return nil, c.badResponse(route, response.StatusCode())
+	}
+	return body.job(), nil
 }
 
 // badResponse is the error for a 2xx answer the SDK cannot use: an ApiError with the status the API
@@ -173,23 +161,22 @@ func (c *core) fetchTranscript(ctx context.Context, job *Job) (*Transcript, erro
 	if job.TranscriptID == "" {
 		return nil, newSDKError(KindUpload, "transcript_missing", "The job is done but has no transcript id.", nil, c.cfg.redactor(), hintInputs{})
 	}
+	return c.readTranscript(ctx, job.TranscriptID)
+}
+
+// readTranscript reads one transcript by id.
+func (c *core) readTranscript(ctx context.Context, id string) (*Transcript, error) {
 	const route = "GET /v1/transcripts/{id}"
-	response, err := c.api.GetTranscriptWithResponse(ctx, job.TranscriptID)
+	response, err := c.api.GetTranscriptWithResponse(ctx, id)
 	if err != nil {
 		return nil, c.readFailed(err, route)
 	}
-	var head struct {
-		ID       string  `json:"id"`
-		Title    string  `json:"title"`
-		Language *string `json:"language_detected"`
-		Duration float64 `json:"duration_seconds"`
+	if failure := c.unusable(route, response.HTTPResponse, response.JSON200 != nil, response.Body, transcriptRequired...); failure != nil {
+		return nil, failure
 	}
-	if len(response.Body) == 0 || json.Unmarshal(response.Body, &head) != nil || head.ID == "" {
+	transcript, err := parseTranscript(response.Body)
+	if err != nil {
 		return nil, c.badResponse(route, response.StatusCode())
-	}
-	transcript := &Transcript{ID: head.ID, Title: head.Title, DurationSeconds: head.Duration, Raw: json.RawMessage(bytes.Clone(response.Body))}
-	if head.Language != nil {
-		transcript.Language = *head.Language
 	}
 	return transcript, nil
 }

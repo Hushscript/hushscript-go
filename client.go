@@ -15,8 +15,10 @@ const modulePath = "github.com/Hushscript/hushscript-go"
 
 // Client is the entry point of the SDK. It is safe for concurrent use.
 type Client struct {
-	// Jobs waits for and reads processing jobs.
+	// Jobs lists, reads and waits for processing jobs.
 	Jobs JobsService
+	// Transcripts lists and reads finished transcripts.
+	Transcripts TranscriptsService
 
 	core *core
 }
@@ -45,7 +47,7 @@ func New(opts ...Option) (*Client, error) {
 		return nil, newSDKError(KindConfiguration, "config_invalid", "The generated client could not be built.", err, cfg.redactor(), hintInputs{})
 	}
 	c := &core{cfg: cfg, doer: d, api: api}
-	return &Client{Jobs: JobsService{core: c}, core: c}, nil
+	return &Client{Jobs: JobsService{core: c}, Transcripts: TranscriptsService{core: c}, core: c}, nil
 }
 
 // API returns the generated client for every /v1 operation, sharing the SDK's retries, timeouts and

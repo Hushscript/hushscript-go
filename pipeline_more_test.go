@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -225,6 +226,20 @@ func TestAFallbackDecidedBeforeAConcurrentDirectSuccessNeverTurnsTheJobProxied(t
 	_ = wantCode(t, err, KindUpload, "parts_exhausted")
 	if n := api.count("complete"); n != 0 {
 		t.Errorf("%d complete requests after a failed part; a body-less complete would miss the direct parts", n)
+	}
+	// The swap was lost to a direct success, so the part is owed the direct path's one fresh URL page
+	// (spec 8.4) and a second PUT before it is given up.
+	if n := api.count("partUrls"); n != 1 {
+		t.Errorf("%d part-urls fetches, want the one refetch", n)
+	}
+	attempts := 0
+	for _, s := range api.requests("r2") {
+		if s.n == 1 {
+			attempts++
+		}
+	}
+	if attempts != 2 {
+		t.Errorf("part 1 was sent to storage %d times, want 2 (the PUT and the one after the refetch)", attempts)
 	}
 }
 
@@ -487,6 +502,42 @@ func TestAnUnusableSuccessBodyIsBadResponseWithTheStatusItCameWith(t *testing.T)
 				t.Error("a create was sent after a preflight answer the SDK could not use")
 			}
 		})
+	}
+}
+
+// A 2xx other than 200 has no decoded body, so the SDK cannot use it however well formed it is; the error
+// carries the status the API really answered with.
+func TestAWellFormedBodyOnANon200SuccessIsBadResponseWithThatStatus(t *testing.T) {
+	cases := []struct {
+		name, route, body string
+		created           bool
+	}{
+		{"account", "account", `{"balance_seconds":36000,"held_seconds":0,"limits":{"active_jobs":0,"max_active_jobs":50,"max_daily_seconds":100000,"used_today_seconds":0}}`, false},
+		{"create", "create", `{"job_id":"job_1","state":"uploading"}`, true},
+		{"complete", "complete", `{"ok":true,"state":"queued"}`, true},
+		{"job", "job", `{"id":"job_1","state":"done","transcript_id":"tr_1"}`, true},
+		{"transcript", "transcript", `{"id":"tr_1","title":"T","duration_seconds":20,"body":{"version":1,"original":{"utterances":[]},"translations":{}}}`, true},
+	}
+	for _, status := range []int{201, 202, 204} {
+		for _, tc := range cases {
+			t.Run(fmt.Sprintf("%s %d", tc.name, status), func(t *testing.T) {
+				r := newRig(t)
+				r.api.setHook(func(s *seen) (int, string, bool) {
+					if s.route == tc.route {
+						return status, tc.body, true
+					}
+					return 0, "", false
+				})
+				_, err := r.transcribe(nil)
+				e := wantCode(t, err, KindAPI, "bad_response")
+				if e.Status != status {
+					t.Errorf("status %d, want %d", e.Status, status)
+				}
+				if tc.created != (e.IdempotencyKey != "") {
+					t.Errorf("idempotency key %q where created = %t", e.IdempotencyKey, tc.created)
+				}
+			})
+		}
 	}
 }
 
