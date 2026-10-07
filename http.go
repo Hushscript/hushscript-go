@@ -140,7 +140,7 @@ func (d *doer) Do(req *http.Request) (*http.Response, error) {
 				return nil, d.aborted(err)
 			}
 		}
-		out := d.attempt(ctx, req)
+		out := d.attempt(ctx, req, class)
 		record := attempt{method: req.Method, path: label, number: number, duration: out.took}
 
 		if out.err != nil {
@@ -226,7 +226,7 @@ func (d *doer) timeoutFor(ctx context.Context) time.Duration {
 }
 
 // attempt sends the request once, under its own timeout, and reads the whole answer inside it.
-func (d *doer) attempt(parent context.Context, req *http.Request) outcome {
+func (d *doer) attempt(parent context.Context, req *http.Request, class retryClass) outcome {
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(parent, d.timeoutFor(parent))
 	defer cancel()
@@ -250,6 +250,16 @@ func (d *doer) attempt(parent context.Context, req *http.Request) outcome {
 			return outcome{err: err, took: time.Since(started)}
 		}
 		r.Body = body
+	}
+	if !replayableByTransport(class) {
+		// net/http's HTTP/2 transport sends the request again after a PROTOCOL_ERROR or REFUSED_STREAM
+		// reset, without telling the caller. With a body it rebuilds it from GetBody and gives up when
+		// there is none; a request with no body at all is always sent again. This loop is the only place
+		// that may send these requests twice.
+		r.GetBody = nil
+		if r.URL.Scheme == "https" && (r.Body == nil || r.Body == http.NoBody) {
+			r.Body = emptyBody{} // a body that cannot be rebuilt, so there is nothing for the transport to resend
+		}
 	}
 	// The token goes to the API host only; direct-to-storage part uploads carry their own signature,
 	// and never the token, even when the storage URL happens to share the API's origin.
@@ -292,6 +302,25 @@ func (d *doer) attempt(parent context.Context, req *http.Request) outcome {
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	resp.ContentLength = int64(len(body))
 	return outcome{resp: resp, body: body, sent: true, took: time.Since(started)}
+}
+
+// emptyBody is a request body with no bytes in it that net/http does not recognize as http.NoBody.
+type emptyBody struct{}
+
+func (emptyBody) Read([]byte) (int, error) { return 0, io.EOF }
+func (emptyBody) Close() error             { return nil }
+
+// replayableByTransport reports whether the transport itself may send the request again: only for the
+// classes whose replay is harmless (spec section 7.2, R54). A claim, a rotate, a signup, a purchase, any
+// other mutation and a keyless upload create (planned as a mutation) must be sent at most once per
+// attempt of this loop.
+func replayableByTransport(class retryClass) bool {
+	switch class {
+	case classSafe, classUpload, classUploadCreate:
+		return true
+	default:
+		return false
+	}
 }
 
 // connectionSetupFailure reports whether err proves the request never left: DNS, dial and TLS
