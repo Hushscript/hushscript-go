@@ -9,30 +9,46 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 )
 
 // R54 over HTTP/2: the default client negotiates h2, and net/http's HTTP/2 transport sends a request
-// again, rebuilding its body from GetBody, when the server resets the stream with PROTOCOL_ERROR or
-// REFUSED_STREAM. The server below speaks just enough raw HTTP/2 to reset the first stream it sees after
-// reading its whole body, and to answer every later stream with an empty 200.
+// again, rebuilding its body from GetBody, when the server resets the stream with a code it retries.
+// go1.25 and go1.26 retry PROTOCOL_ERROR and REFUSED_STREAM; go1.27 retries only REFUSED_STREAM. The
+// server below speaks just enough raw HTTP/2 to answer each stream it sees from a script, and to count
+// the body bytes each stream carried. Over cleartext it speaks h2 with prior knowledge (h2c), which the
+// SDK accepts only for localhost.
+type h2Reply struct {
+	reset  uint32 // an RST_STREAM error code, sent after the whole request was read
+	status int    // otherwise an answer with no body: 200 or 503
+}
+
 type h2ResetServer struct {
 	ln      net.Listener
+	scheme  string
 	client  *http.Client
+	script  func(stream int) h2Reply
 	mu      sync.Mutex
 	streams int
+	pending map[uint32]int
+	bodies  []int
 	conns   []net.Conn
 }
 
-func newH2ResetServer(t *testing.T) *h2ResetServer {
+// resetFirst resets the first stream with code and answers every later one with an empty 200.
+func resetFirst(code uint32) func(int) h2Reply {
+	return func(n int) h2Reply {
+		if n == 1 {
+			return h2Reply{reset: code}
+		}
+		return h2Reply{status: http.StatusOK}
+	}
+}
+
+func newH2ResetServer(t *testing.T, cleartext bool, script func(int) h2Reply) *h2ResetServer {
 	t.Helper()
-	certSource := httptest.NewTLSServer(http.NotFoundHandler())
-	certSource.Close()
-	pool := x509.NewCertPool()
-	pool.AddCert(certSource.Certificate())
-	config := certSource.TLS.Clone()
-	config.NextProtos = []string{"h2"}
 	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -42,8 +58,22 @@ func newH2ResetServer(t *testing.T) *h2ResetServer {
 		t.Fatal("http.DefaultTransport is not an *http.Transport")
 	}
 	cloned := transport.Clone()
-	cloned.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
-	s := &h2ResetServer{ln: tls.NewListener(ln, config), client: &http.Client{Transport: cloned}}
+	s := &h2ResetServer{script: script, pending: map[uint32]int{}, scheme: "https"}
+	if cleartext {
+		cloned.Protocols = new(http.Protocols)
+		cloned.Protocols.SetUnencryptedHTTP2(true)
+		s.ln, s.scheme = ln, "http"
+	} else {
+		certSource := httptest.NewTLSServer(http.NotFoundHandler())
+		certSource.Close()
+		pool := x509.NewCertPool()
+		pool.AddCert(certSource.Certificate())
+		config := certSource.TLS.Clone()
+		config.NextProtos = []string{"h2"}
+		cloned.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+		s.ln = tls.NewListener(ln, config)
+	}
+	s.client = &http.Client{Transport: cloned}
 	t.Cleanup(func() {
 		cloned.CloseIdleConnections()
 		_ = s.ln.Close()
@@ -68,7 +98,7 @@ func newH2ResetServer(t *testing.T) *h2ResetServer {
 	return s
 }
 
-func (s *h2ResetServer) URL() string { return "https://" + s.ln.Addr().String() }
+func (s *h2ResetServer) URL() string { return s.scheme + "://" + s.ln.Addr().String() }
 
 // streamsSeen is how many requests reached the server, whatever their path (every test has its own server).
 func (s *h2ResetServer) streamsSeen() int {
@@ -86,6 +116,7 @@ const (
 	h2FlagAck           = 0x1
 	h2FlagEndHeaders    = 0x4
 	h2ErrorProtocol     = 0x1
+	h2ErrorRefused      = 0x7
 	h2HPACKStatus200    = 0x88 // ":status: 200" is entry 8 of the HPACK static table
 	h2ClientPrefaceSize = 24
 )
@@ -123,22 +154,50 @@ func (s *h2ResetServer) serve(conn net.Conn) {
 			if err := h2WriteFrame(conn, h2FrameSettings, h2FlagAck, 0, nil); err != nil {
 				return
 			}
-		case (kind == h2FrameHeaders || kind == h2FrameData) && flags&h2FlagEndStream != 0:
+		case kind == h2FrameHeaders || kind == h2FrameData:
 			s.mu.Lock()
-			s.streams++
-			first := s.streams == 1
+			if kind == h2FrameData {
+				s.pending[stream] += length
+			}
+			done := flags&h2FlagEndStream != 0
+			var n int
+			if done {
+				s.streams++
+				n = s.streams
+				s.bodies = append(s.bodies, s.pending[stream])
+			}
 			s.mu.Unlock()
+			if !done {
+				continue
+			}
 			var err error
-			if first {
-				err = h2WriteFrame(conn, h2FrameRSTStream, 0, stream, binary.BigEndian.AppendUint32(nil, h2ErrorProtocol))
+			if reply := s.script(n); reply.reset != 0 {
+				err = h2WriteFrame(conn, h2FrameRSTStream, 0, stream, binary.BigEndian.AppendUint32(nil, reply.reset))
 			} else {
-				err = h2WriteFrame(conn, h2FrameHeaders, h2FlagEndHeaders|h2FlagEndStream, stream, []byte{h2HPACKStatus200})
+				err = h2WriteFrame(conn, h2FrameHeaders, h2FlagEndHeaders|h2FlagEndStream, stream, h2Status(reply.status))
 			}
 			if err != nil {
 				return
 			}
 		}
 	}
+}
+
+// h2Status is the HPACK block of a response that carries only a status.
+func h2Status(status int) []byte {
+	if status == http.StatusOK {
+		return []byte{h2HPACKStatus200}
+	}
+	// A literal ":status" without indexing: the name is entry 8 of the static table, the value its text.
+	value := strconv.Itoa(status)
+	return append([]byte{0x08, byte(len(value))}, value...)
+}
+
+// bodiesSeen is the number of body bytes of each request that reached the server, in arrival order.
+func (s *h2ResetServer) bodiesSeen() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int(nil), s.bodies...)
 }
 
 func TestANonReplayableRequestIsSentOnceWhenTheServerResetsItsStreamOverHTTP2(t *testing.T) {
@@ -192,22 +251,60 @@ func TestANonReplayableRequestIsSentOnceWhenTheServerResetsItsStreamOverHTTP2(t 
 			},
 		},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			srv := newH2ResetServer(t)
-			// The purchase class retries a lost answer once on its own, with its key; switch that off so
-			// only the transport could send it twice.
-			c := newTestClient(t, srv.URL(), newFakeClock(), WithHTTPClient(srv.client), WithMaxRetries(0))
-			err := tc.run(t, c, srv)
-			e := wantCode(t, err, tc.kind, tc.code)
-			if e.Status != 0 {
-				t.Errorf("status %d on a request that got no answer", e.Status)
+	for _, reset := range h2Resets {
+		for _, scheme := range h2Schemes {
+			for _, tc := range cases {
+				t.Run(reset.name+"/"+scheme.name+"/"+tc.name, func(t *testing.T) {
+					srv := newH2ResetServer(t, scheme.cleartext, resetFirst(reset.code))
+					// The purchase class retries a lost answer once on its own, with its key; switch that off so
+					// only the transport could send it twice.
+					c := newTestClient(t, srv.URL(), newFakeClock(), WithHTTPClient(srv.client), WithMaxRetries(0))
+					err := tc.run(t, c, srv)
+					e := wantCode(t, err, tc.kind, tc.code)
+					if e.Status != 0 {
+						t.Errorf("status %d on a request that got no answer", e.Status)
+					}
+					if got := srv.streamsSeen(); got != 1 {
+						t.Errorf("the request reached the server %d times, want once", got)
+					}
+				})
 			}
-			if got := srv.streamsSeen(); got != 1 {
-				t.Errorf("the request reached the server %d times, want once", got)
-			}
-		})
+		}
 	}
+}
+
+// h2Resets are the stream-reset codes that make an HTTP/2 transport send a request again. go1.25 and
+// go1.26 retry both; go1.27 retries only REFUSED_STREAM, so PROTOCOL_ERROR proves something only on the
+// older two and REFUSED_STREAM on all three.
+var h2Resets = []struct {
+	name string
+	code uint32
+}{
+	{"protocol error", h2ErrorProtocol},
+	{"refused stream", h2ErrorRefused},
+}
+
+// h2Schemes are the two ways the default client reaches an HTTP/2 server: TLS with ALPN, and cleartext
+// with prior knowledge, which the SDK allows for localhost only.
+var h2Schemes = []struct {
+	name      string
+	cleartext bool
+}{
+	{"https", false},
+	{"h2c", true},
+}
+
+// h2TransportRetries reports whether this Go version's transport sends a plain GET again after a reset
+// with code.
+func h2TransportRetries(t *testing.T, cleartext bool, code uint32) bool {
+	t.Helper()
+	srv := newH2ResetServer(t, cleartext, resetFirst(code))
+	resp, err := srv.client.Get(srv.URL() + "/probe")
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return srv.streamsSeen() == 2
 }
 
 // The controls that make the test above mean something: the HTTP/2 transport does resend a request that
@@ -227,15 +324,50 @@ func TestARepeatableRequestIsResentByTheTransportAfterAStreamResetOverHTTP2(t *t
 			return err
 		},
 	}
-	for name, run := range cases {
-		t.Run(name, func(t *testing.T) {
-			srv := newH2ResetServer(t)
-			c := newTestClient(t, srv.URL(), newFakeClock(), WithHTTPClient(srv.client), WithMaxRetries(0))
-			if err := run(t, c); err != nil {
-				t.Fatalf("the transport's replay should have succeeded: %v", err)
+	for _, reset := range h2Resets {
+		for _, scheme := range h2Schemes {
+			for name, run := range cases {
+				t.Run(reset.name+"/"+scheme.name+"/"+name, func(t *testing.T) {
+					if !h2TransportRetries(t, scheme.cleartext, reset.code) {
+						t.Skipf("this Go version's HTTP/2 transport does not retry %s, so the replay cannot be shown", reset.name)
+					}
+					srv := newH2ResetServer(t, scheme.cleartext, resetFirst(reset.code))
+					c := newTestClient(t, srv.URL(), newFakeClock(), WithHTTPClient(srv.client), WithMaxRetries(0))
+					if err := run(t, c); err != nil {
+						t.Fatalf("the transport's replay should have succeeded: %v", err)
+					}
+					if got := srv.streamsSeen(); got != 2 {
+						t.Errorf("the request reached the server %d times, want the original and one replay", got)
+					}
+				})
 			}
-			if got := srv.streamsSeen(); got != 2 {
-				t.Errorf("the request reached the server %d times, want the original and one replay", got)
+		}
+	}
+}
+
+// The SDK's own retry is the one place that may send a purchase twice, and each attempt must carry the
+// whole body once: a 503 is answered, the SDK sends it again with the same key, and the server gets two
+// complete requests, neither short nor doubled.
+func TestEachSDKAttemptOverHTTP2SendsTheFullBodyOnce(t *testing.T) {
+	const body = `{"pack":"45min","idempotency_key":"k-0123456789abcdef"}`
+	for _, scheme := range h2Schemes {
+		t.Run(scheme.name, func(t *testing.T) {
+			srv := newH2ResetServer(t, scheme.cleartext, func(n int) h2Reply {
+				if n == 1 {
+					return h2Reply{status: http.StatusServiceUnavailable}
+				}
+				return h2Reply{status: http.StatusOK}
+			})
+			clock := newFakeClock()
+			c := newTestClient(t, srv.URL(), clock, WithHTTPClient(srv.client), WithMaxRetries(1))
+			if _, err := do(t, c, http.MethodPost, "/v1/billing/purchase", body); err != nil {
+				t.Fatalf("the retried purchase failed: %v", err)
+			}
+			if got := srv.bodiesSeen(); len(got) != 2 || got[0] != len(body) || got[1] != len(body) {
+				t.Errorf("body bytes per attempt = %v, want two attempts of %d", got, len(body))
+			}
+			if len(clock.slept()) != 1 {
+				t.Errorf("the SDK slept %v, want one pause before its one retry", clock.slept())
 			}
 		})
 	}

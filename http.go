@@ -254,10 +254,10 @@ func (d *doer) attempt(parent context.Context, req *http.Request, class retryCla
 	if !replayableByTransport(class) {
 		// net/http's HTTP/2 transport sends the request again after a PROTOCOL_ERROR or REFUSED_STREAM
 		// reset, without telling the caller. With a body it rebuilds it from GetBody and gives up when
-		// there is none; a request with no body at all is always sent again. This loop is the only place
-		// that may send these requests twice.
+		// there is none; a request with no body at all is always sent again, over TLS and over cleartext
+		// h2 (localhost only) alike. This loop is the only place that may send these requests twice.
 		r.GetBody = nil
-		if r.URL.Scheme == "https" && (r.Body == nil || r.Body == http.NoBody) {
+		if r.Body == nil || r.Body == http.NoBody {
 			r.Body = emptyBody{} // a body that cannot be rebuilt, so there is nothing for the transport to resend
 		}
 	}
