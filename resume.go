@@ -50,7 +50,7 @@ func decodeResumeToken(token string) (resumeState, error) {
 	}
 	state := body.resumeState
 	if body.V != resumeTokenVersion || !safeSegment(state.JobID) || state.IdempotencyKey == "" || state.Size < 1 ||
-		math.IsNaN(state.DurationSeconds) || math.IsInf(state.DurationSeconds, 0) || state.DurationSeconds <= 0 {
+		!(state.DurationSeconds >= minDurationSeconds && math.Ceil(state.DurationSeconds) <= maxDurationSeconds) {
 		return resumeState{}, errBadToken
 	}
 	return state, nil
