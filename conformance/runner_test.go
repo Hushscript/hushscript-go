@@ -79,7 +79,7 @@ var operations = map[string]operation{
 	"listTranscripts": {run: listTranscripts},
 	"transcribe":      {run: transcribe},
 	"resume":          {run: resume},
-	"probe":           {run: probeDurations},
+	"probe":           {run: probeDurations, direct: true},
 	"format":          {run: formatGoldens, direct: true},
 }
 

@@ -2,6 +2,8 @@ package hushscript
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 )
@@ -126,6 +128,29 @@ func TestATwoXXWithAnUnusableBodyIsBadResponseWithThatStatusOnEveryOperation(t *
 					t.Errorf("status %d, want %d", e.Status, status)
 				}
 			})
+		}
+	}
+}
+
+// A 2xx that claims to be JSON and is not (an HTML error page from a proxy, a cut-off body) is
+// bad_response on every operation: the decoder's own syntax error never reaches the caller.
+func TestATwoXXThatIsNotJSONIsBadResponseOnEveryOperationAndNeverARawSyntaxError(t *testing.T) {
+	for _, body := range []string{"<html>bad gateway</html>", `{"balance_seconds":`, "", "not json"} {
+		for _, status := range []int{200, 201, 202, 203} {
+			for _, tc := range twoXXCalls() {
+				t.Run(fmt.Sprintf("%s %d %q", tc.name, status, body), func(t *testing.T) {
+					api := twoXXServer(t, tc, status, body)
+					err := tc.call(api.client(t))
+					e := wantCode(t, err, KindAPI, "bad_response")
+					if e.Status != status {
+						t.Errorf("status %d, want %d", e.Status, status)
+					}
+					var syntax *json.SyntaxError
+					if errors.As(err, &syntax) {
+						t.Errorf("a raw JSON syntax error escaped: %v", err)
+					}
+				})
+			}
 		}
 	}
 }
