@@ -315,12 +315,7 @@ func (emptyBody) Close() error             { return nil }
 // other mutation and a keyless upload create (planned as a mutation) must be sent at most once per
 // attempt of this loop.
 func replayableByTransport(class retryClass) bool {
-	switch class {
-	case classSafe, classUpload, classUploadCreate:
-		return true
-	default:
-		return false
-	}
+	return class == classSafe || class == classUpload || class == classUploadCreate
 }
 
 // connectionSetupFailure reports whether err proves the request never left: DNS, dial and TLS

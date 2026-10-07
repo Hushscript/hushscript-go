@@ -92,7 +92,7 @@ const (
 
 func h2WriteFrame(conn net.Conn, kind, flags byte, stream uint32, payload []byte) error {
 	frame := make([]byte, 9, 9+len(payload))
-	frame[0], frame[1], frame[2] = byte(len(payload)>>16), byte(len(payload)>>8), byte(len(payload))
+	frame[0], frame[1], frame[2] = byte(len(payload)>>16), byte(len(payload)>>8), byte(len(payload)) //nolint:gosec // the frames this test writes are a few bytes long
 	frame[3], frame[4] = kind, flags
 	binary.BigEndian.PutUint32(frame[5:], stream)
 	_, err := conn.Write(append(frame, payload...))
