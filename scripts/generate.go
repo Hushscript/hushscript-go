@@ -99,8 +99,8 @@ func run(ctx context.Context, args []string) error {
 	return generateClient(ctx, patched)
 }
 
-// generateClient runs oapi-codegen, which the module pins through its tool directive, on a private
-// copy of the spec.
+// generateClient runs oapi-codegen, which tools/go.mod pins through its tool directive (kept out of the
+// module a consumer resolves), on a private copy of the spec.
 func generateClient(ctx context.Context, patched []byte) error {
 	dir, err := os.MkdirTemp("", "hushscript-spec-")
 	if err != nil {
@@ -111,7 +111,7 @@ func generateClient(ctx context.Context, patched []byte) error {
 	if err := os.WriteFile(specPath, patched, 0o600); err != nil { //nolint:gosec // the path is inside the directory this process just created
 		return fmt.Errorf("writing the patched spec: %w", err)
 	}
-	command := exec.CommandContext(ctx, "go", "tool", "oapi-codegen", "-config", "oapi-codegen.yaml", specPath) //nolint:gosec // fixed tool name, the only variable is a path this process just created
+	command := exec.CommandContext(ctx, "go", "tool", "-modfile=tools/go.mod", "oapi-codegen", "-config", "oapi-codegen.yaml", specPath) //nolint:gosec // fixed tool name, the only variable is a path this process just created
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	if err := command.Run(); err != nil {

@@ -94,7 +94,7 @@ services:
       - -c
       - >-
         go build ./...
-        && test -z "$(go tool gofumpt -l $(find . -name '*.go' -not -path './generated/*'))"
+        && test -z "$(go tool -modfile=tools/go.mod gofumpt -l $(find . -name '*.go' -not -path './generated/*'))"
         && timeout 900 golangci-lint run ./...
 
   conformance:
@@ -123,7 +123,8 @@ services:
       - -c
       - >-
         timeout 600 go mod tidy -diff
-        && timeout 600 go tool govulncheck ./...
+        && (cd tools && timeout 600 go mod tidy -diff)
+        && timeout 600 go tool -modfile=tools/go.mod govulncheck ./...
 
   # Outbound network: fetches the spec and hints.json, writes openapi.json and generated/.
   regen:
