@@ -190,7 +190,7 @@ func h2Status(status int) []byte {
 	}
 	// A literal ":status" without indexing: the name is entry 8 of the static table, the value its text.
 	value := strconv.Itoa(status)
-	return append([]byte{0x08, byte(len(value))}, value...)
+	return append([]byte{0x08, byte(len(value))}, value...) //nolint:gosec // a three-digit status
 }
 
 // bodiesSeen is the number of body bytes of each request that reached the server, in arrival order.
@@ -299,7 +299,11 @@ var h2Schemes = []struct {
 func h2TransportRetries(t *testing.T, cleartext bool, code uint32) bool {
 	t.Helper()
 	srv := newH2ResetServer(t, cleartext, resetFirst(code))
-	resp, err := srv.client.Get(srv.URL() + "/probe")
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL()+"/probe", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := srv.client.Do(req)
 	if err != nil {
 		return false
 	}
