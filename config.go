@@ -1,8 +1,6 @@
 package hushscript
 
 import (
-	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -44,21 +42,11 @@ type config struct {
 	jitter func(time.Duration) time.Duration
 }
 
-func (c config) String() string {
-	return fmt.Sprintf("hushscript.config{baseURL: %s, timeout: %s, maxRetries: %d, token: %s}",
-		c.baseURL, c.timeout, c.maxRetries, redactedToken)
-}
-
-func (c config) GoString() string { return c.String() }
-
-// Format covers every fmt verb, including %d and %x, which would otherwise print the struct fields.
-func (c config) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, c.String()) }
-
 func (c config) redactor() redactor {
 	if c.tokens != nil {
 		return c.tokens.redactor()
 	}
-	return redactor{token: c.token.reveal()}
+	return redactor{token: c.token}
 }
 
 // Option configures New.
@@ -67,7 +55,7 @@ type Option func(*config) error
 // WithToken sets the API token. Without it, New reads HUSHSCRIPT_TOKEN.
 func WithToken(token string) Option {
 	return func(c *config) error {
-		c.token = secret(token)
+		c.token = newSecret(token)
 		return nil
 	}
 }
@@ -218,10 +206,10 @@ func resolveConfig(opts []Option, withToken bool) (config, error) {
 		}
 	}
 	if withToken {
-		if c.token == "" {
-			c.token = secret(os.Getenv("HUSHSCRIPT_TOKEN"))
+		if c.token.isEmpty() {
+			c.token = newSecret(os.Getenv("HUSHSCRIPT_TOKEN"))
 		}
-		if c.token == "" {
+		if c.token.isEmpty() {
 			failure := newConfigError(missingTokenMessage)
 			failure.Hint = missingTokenHint
 			return config{}, failure
@@ -233,7 +221,7 @@ func resolveConfig(opts []Option, withToken bool) (config, error) {
 			return config{}, newConfigError("This doesn't look like a Hushscript token.")
 		}
 	} else {
-		c.token = ""
+		c.token = secret{}
 	}
 	c.tokens = newTokenBox(c.token.reveal())
 	if c.baseURL == "" {

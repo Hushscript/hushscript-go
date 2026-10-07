@@ -94,3 +94,15 @@ func TestOnlyATextThatPassesTheTokenCheckIsKept(t *testing.T) {
 		}
 	}
 }
+
+func TestTheTokenCheckIgnoresTheEnvironment(t *testing.T) {
+	t.Setenv("HUSHSCRIPT_BASE_URL", "ftp://not-a-base-url")
+	t.Setenv("HUSHSCRIPT_LOG", "loud")
+	t.Setenv("HUSHSCRIPT_TOKEN", "")
+	if !isToken("hsr1:eu:pat.aaaa.bbbb") {
+		t.Error("a well-formed token failed the check because of an unrelated setting")
+	}
+	if isToken("not-a-token") {
+		t.Error("a text without the prefix passed")
+	}
+}

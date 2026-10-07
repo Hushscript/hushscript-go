@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	hushscript "github.com/Hushscript/hushscript-go"
@@ -42,14 +43,19 @@ func main() {
 	}
 }
 
-// isToken reports whether the text passes the token format check of the SDK, which hushscript.New
-// applies to a token it is given: only such a text may replace what the token file holds.
+// isToken reports whether the text has the shape of a token: the hsr prefix and printable ASCII
+// only, which is what hushscript.New checks of a token it is given. It looks at the text alone, so
+// an unrelated setting such as HUSHSCRIPT_BASE_URL cannot fail it.
 func isToken(text string) bool {
-	if text == "" {
+	if !strings.HasPrefix(text, "hsr") {
 		return false
 	}
-	_, err := hushscript.New(hushscript.WithToken(text))
-	return err == nil
+	for i := range len(text) {
+		if text[i] < 0x21 || text[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // keep writes the token to path with mode 0600. It goes to a private temporary file in the same

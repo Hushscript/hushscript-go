@@ -1,8 +1,6 @@
 package hushscript
 
 import (
-	"fmt"
-	"log/slog"
 	"regexp"
 	"strings"
 )
@@ -23,31 +21,18 @@ var urlQuery = regexp.MustCompile(`(https?://[^\s"'<>?#]+)\?[^\s"'<>#]*`)
 // redactedQuery replaces a URL's query in text.
 const redactedQuery = "…[redacted]"
 
-// secret holds the token. Every way of printing it shows the redaction marker instead.
-type secret string
-
-func (s secret) reveal() string { return string(s) }
-
-func (secret) String() string { return redactedToken }
-
-func (secret) GoString() string { return redactedToken }
-
-func (secret) LogValue() slog.Value { return slog.StringValue(redactedToken) }
-
-// Format covers every fmt verb, including the ones that bypass String (%x, %d).
-func (secret) Format(f fmt.State, _ rune) {
-	_, _ = f.Write([]byte(redactedToken))
-}
-
 // redactor removes the client's token, and anything shaped like a token, from text.
 type redactor struct {
-	token string
+	token secret
 	// past holds the tokens a rotation replaced.
-	past []string
+	past []secret
 }
 
+func newRedactor(token string) redactor { return redactor{token: newSecret(token)} }
+
 func (r redactor) apply(text string) string {
-	for _, token := range append([]string{r.token}, r.past...) {
+	for _, held := range append([]secret{r.token}, r.past...) {
+		token := held.reveal()
 		if token == "" {
 			continue
 		}

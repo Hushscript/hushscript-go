@@ -3,6 +3,7 @@ package hushscript
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
@@ -125,9 +126,8 @@ type Error struct {
 	JobError string
 
 	// receivedToken is the token string a claim or rotation answer carried when the rest of the answer
-	// could not be used (read it with ReceivedToken). It is held by pointer so that fmt prints an
-	// address, never the text, at any verb; being unexported keeps it out of json and gob.
-	receivedToken *string
+	// could not be used (read it with ReceivedToken).
+	receivedToken secret
 
 	cause error
 	// causeText is the cause in one redacted line for Error(), set for network failures only.
@@ -160,11 +160,14 @@ func (e *Error) Error() string {
 // could not be used, so the credential the server showed once is not lost; "" when there is none. It
 // is never part of Error(), the message, a formatted error or its JSON; treat it like any token.
 func (e *Error) ReceivedToken() string {
-	if e == nil || e.receivedToken == nil {
+	if e == nil {
 		return ""
 	}
-	return *e.receivedToken
+	return e.receivedToken.reveal()
 }
+
+// LogValue is the error as slog logs it: the redacted text of Error, never the struct.
+func (e Error) LogValue() slog.Value { return slog.StringValue(e.Error()) }
 
 // Unwrap returns the error that caused this one, for errors.Is and errors.As.
 func (e *Error) Unwrap() error { return e.cause }
@@ -174,57 +177,59 @@ func (e *Error) Unwrap() error { return e.cause }
 // return the raw error; Is and As look inside it instead, and As hands out only an error whose whole
 // chain is free of the token (a transport that echoes request headers into its errors gets withheld).
 //
-// Its state sits behind one pointer so that fmt, which prints a struct reached through a bad verb
-// (%s, %q, %d of an Error) field by field, shows an address and never the redactor's tokens or the
-// raw cause.
+// The raw error and the redactor sit in closures, not in fields: reflection-driven printing (a bad
+// fmt verb, spew, testify's diff) shows a function value as an address, so it cannot reach them.
+// Unsafe reflection or a memory dump still can.
 type redactedCause struct {
-	held *heldCause
-}
-
-type heldCause struct {
 	text string
-	err  error
-	r    redactor
+	is   func(target error) bool
+	as   func(target any) bool
 }
 
 func newRedactedCause(cause error, r redactor) *redactedCause {
-	return &redactedCause{held: &heldCause{text: r.apply(cause.Error()), err: cause, r: r}}
+	return &redactedCause{
+		text: r.apply(cause.Error()),
+		is:   func(target error) bool { return errors.Is(cause, target) },
+		as:   func(target any) bool { return asRedacted(cause, r, target) },
+	}
 }
 
-func (c *redactedCause) Error() string { return c.held.text }
+func (c *redactedCause) Error() string { return c.text }
 
-func (c *redactedCause) Is(target error) bool { return errors.Is(c.held.err, target) }
+func (c *redactedCause) Is(target error) bool { return c.is(target) }
 
-func (c *redactedCause) As(target any) bool {
+func (c *redactedCause) As(target any) bool { return c.as(target) }
+
+func asRedacted(cause error, r redactor, target any) bool {
 	pointer := reflect.ValueOf(target)
 	if pointer.Kind() != reflect.Pointer || pointer.IsNil() {
 		return false
 	}
 	scratch := reflect.New(pointer.Type().Elem())
-	if !errors.As(c.held.err, scratch.Interface()) {
+	if !errors.As(cause, scratch.Interface()) {
 		return false
 	}
-	if found, ok := scratch.Elem().Interface().(error); ok && !c.clean(found) {
+	if found, ok := scratch.Elem().Interface().(error); ok && !chainIsClean(found, r) {
 		return false
 	}
 	pointer.Elem().Set(scratch.Elem())
 	return true
 }
 
-// clean reports whether no error in the chain from err down prints anything redaction would change.
-func (c *redactedCause) clean(err error) bool {
+// chainIsClean reports whether no error in the chain from err down prints anything redaction would change.
+func chainIsClean(err error, r redactor) bool {
 	if err == nil {
 		return true
 	}
-	if c.held.r.apply(err.Error()) != err.Error() {
+	if r.apply(err.Error()) != err.Error() {
 		return false
 	}
 	switch wrapped := err.(type) { //nolint:errorlint // walking the chain by hand is the point
 	case interface{ Unwrap() error }:
-		return c.clean(wrapped.Unwrap())
+		return chainIsClean(wrapped.Unwrap(), r)
 	case interface{ Unwrap() []error }:
 		for _, inner := range wrapped.Unwrap() {
-			if !c.clean(inner) {
+			if !chainIsClean(inner, r) {
 				return false
 			}
 		}

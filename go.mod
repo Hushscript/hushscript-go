@@ -10,13 +10,16 @@ tool (
 	mvdan.cc/gofumpt
 )
 
-require github.com/oapi-codegen/runtime v1.7.0
+require (
+	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
+	github.com/oapi-codegen/runtime v1.7.0
+	github.com/stretchr/testify v1.11.1
+)
 
 require (
 	github.com/apapsch/go-jsonmerge/v2 v2.0.0 // indirect
 	github.com/avast/retry-go v3.0.0+incompatible // indirect
 	github.com/avito-tech/go-mutesting v0.0.0-20250315181531-3ae1394fcbfa // indirect
-	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dprotaso/go-yit v0.0.0-20220510233725-9ba8df137936 // indirect
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/getkin/kin-openapi v0.142.0 // indirect
@@ -37,7 +40,6 @@ require (
 	github.com/schollz/progressbar/v3 v3.14.2 // indirect
 	github.com/speakeasy-api/jsonpath v0.6.3 // indirect
 	github.com/speakeasy-api/openapi v1.24.0 // indirect
-	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/termie/go-shutil v0.0.0-20140729215957-bcacb06fecae // indirect
 	github.com/ulikunitz/xz v0.5.11 // indirect
 	github.com/vmware-labs/yaml-jsonpath v0.3.2 // indirect
