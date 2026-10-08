@@ -389,9 +389,10 @@ reach the SDK.
 ## Privacy
 
 The SDK sends no telemetry. The only client identification is the `User-Agent` header
-(`hushscript-go/<version> go/<version>`). Logging is off by default; `HUSHSCRIPT_LOG=debug` (or
-`WithLogLevel("debug")`, or `WithLogger`) writes one line per request attempt with the method, path,
-status and timing, and never a header, body, title or transcript text.
+(`hushscript-go/<version> go/<version>`, or `go/devel` on a toolchain without a numeric version).
+Logging is off by default; `HUSHSCRIPT_LOG=debug` (or `WithLogLevel("debug")`, or `WithLogger`)
+writes one line per request attempt with the method, path, status and timing, and never a header,
+body, title or transcript text.
 
 ## The low-level API
 
