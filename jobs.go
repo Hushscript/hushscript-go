@@ -10,8 +10,7 @@ import (
 )
 
 // JobOptions is what a job was submitted with, from the API's content-free summary: it says whether
-// keyterms and a prompt were set, never what they were. The fields are typed, so a key the API adds to
-// options later is not kept here; Client.API returns the whole body.
+// keyterms and a prompt were set, never what they were.
 type JobOptions struct {
 	// LanguageCode is the forced language; "" when the language was auto-detected.
 	LanguageCode       string
@@ -24,6 +23,8 @@ type JobOptions struct {
 	Prompt   bool
 	// AutoGenerateInsights is the upload's override; nil when it used the account default.
 	AutoGenerateInsights *bool
+	// Raw is the options object as the API sent it, unknown fields included.
+	Raw json.RawMessage
 }
 
 // Job is a processing job as the API reports it (spec 6.4). The private-result and from-url fetch
@@ -52,28 +53,36 @@ type Job struct {
 }
 
 type jobBody struct {
-	ID              string  `json:"id"`
-	State           string  `json:"state"`
-	TranscriptID    *string `json:"transcript_id"`
-	Error           *string `json:"error"`
-	FailureKind     *string `json:"failure_kind"`
-	Mode            string  `json:"mode"`
-	DeclaredSeconds *int    `json:"declared_seconds"`
-	VerifiedSeconds *int    `json:"verified_seconds"`
-	ActualSeconds   *int    `json:"actual_seconds"`
-	BillableSeconds *int    `json:"billable_seconds"`
-	RetryOf         *string `json:"retry_of"`
-	CreatedAt       *int64  `json:"created_at"`
-	Options         struct {
-		LanguageCode         *string  `json:"language_code"`
-		SpeakerDetection     bool     `json:"speaker_detection"`
-		MedicalMode          bool     `json:"medical_mode"`
-		Multichannel         bool     `json:"multichannel"`
-		TranslationTargets   []string `json:"translation_targets"`
-		Keyterms             bool     `json:"keyterms"`
-		Prompt               bool     `json:"prompt"`
-		AutoGenerateInsights *bool    `json:"auto_generate_insights"`
-	} `json:"options"`
+	ID              string         `json:"id"`
+	State           string         `json:"state"`
+	TranscriptID    *string        `json:"transcript_id"`
+	Error           *string        `json:"error"`
+	FailureKind     *string        `json:"failure_kind"`
+	Mode            string         `json:"mode"`
+	DeclaredSeconds *int           `json:"declared_seconds"`
+	VerifiedSeconds *int           `json:"verified_seconds"`
+	ActualSeconds   *int           `json:"actual_seconds"`
+	BillableSeconds *int           `json:"billable_seconds"`
+	RetryOf         *string        `json:"retry_of"`
+	CreatedAt       *int64         `json:"created_at"`
+	Options         jobOptionsBody `json:"options"`
+}
+
+type jobOptionsBody struct {
+	LanguageCode         *string  `json:"language_code"`
+	SpeakerDetection     bool     `json:"speaker_detection"`
+	MedicalMode          bool     `json:"medical_mode"`
+	Multichannel         bool     `json:"multichannel"`
+	TranslationTargets   []string `json:"translation_targets"`
+	Keyterms             bool     `json:"keyterms"`
+	Prompt               bool     `json:"prompt"`
+	AutoGenerateInsights *bool    `json:"auto_generate_insights"`
+	raw                  json.RawMessage
+}
+
+func (o *jobOptionsBody) UnmarshalJSON(data []byte) error {
+	type fields jobOptionsBody
+	return decodeKeepingRaw(data, (*fields)(o), &o.raw)
 }
 
 func valueOf(s *string) string {
@@ -91,7 +100,7 @@ func (b jobBody) job() *Job {
 		Options: JobOptions{
 			LanguageCode: valueOf(b.Options.LanguageCode), SpeakerDetection: b.Options.SpeakerDetection, MedicalMode: b.Options.MedicalMode,
 			Multichannel: b.Options.Multichannel, TranslationTargets: b.Options.TranslationTargets, Keyterms: b.Options.Keyterms,
-			Prompt: b.Options.Prompt, AutoGenerateInsights: b.Options.AutoGenerateInsights,
+			Prompt: b.Options.Prompt, AutoGenerateInsights: b.Options.AutoGenerateInsights, Raw: b.Options.raw,
 		},
 	}
 	if b.CreatedAt != nil {

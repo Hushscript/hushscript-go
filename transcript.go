@@ -23,6 +23,8 @@ type Utterance struct {
 	StartMs     int
 	EndMs       int
 	Text        string
+	// Raw is the utterance object as the API sent it, unknown fields included.
+	Raw json.RawMessage
 }
 
 // Transcript is a finished transcription with its formatters (spec 6.2). It is read-only after it was
@@ -58,6 +60,12 @@ type utteranceBody struct {
 	StartMs timestampNumber `json:"start_ms"`
 	EndMs   timestampNumber `json:"end_ms"`
 	Text    string          `json:"text"`
+	raw     json.RawMessage
+}
+
+func (u *utteranceBody) UnmarshalJSON(data []byte) error {
+	type fields utteranceBody
+	return decodeKeepingRaw(data, (*fields)(u), &u.raw)
 }
 
 type timestampNumber json.Number
@@ -215,7 +223,7 @@ func utterancesOf(raw []utteranceBody, names map[string]string) ([]Utterance, er
 		}
 		out[i] = Utterance{
 			Speaker: u.Speaker, SpeakerName: displayName(u.Speaker, names),
-			StartMs: start, EndMs: end, Text: u.Text,
+			StartMs: start, EndMs: end, Text: u.Text, Raw: u.raw,
 		}
 	}
 	return out, nil

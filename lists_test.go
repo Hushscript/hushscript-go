@@ -476,7 +476,7 @@ func TestBalanceAndAccountReadTheOptionalFieldsAsNilWhenAbsent(t *testing.T) {
 	}
 	if a.BalanceSeconds != 90 || a.HeldSeconds != 10 || a.CreditsExpireAt != nil || !a.CardOnFile || a.DataRegion != "eu" ||
 		a.PurchasesRemainingInWindow == nil || *a.PurchasesRemainingInWindow != 0 ||
-		a.Limits != (UploadLimits{MaxDailySeconds: 36000, MaxActiveJobs: 50, ActiveJobs: 1, UsedTodaySeconds: 600}) {
+		a.Limits.MaxDailySeconds != 36000 || a.Limits.MaxActiveJobs != 50 || a.Limits.ActiveJobs != 1 || a.Limits.UsedTodaySeconds != 600 {
 		t.Errorf("account = %+v", a)
 	}
 	plain := newListAPI(t, func(string, url.Values) (int, string) { return 200, fmt.Sprintf(accountJSON(""), 90, 10, "null") })
@@ -646,6 +646,41 @@ func TestTranscriptPageRejectsRepeatedNonemptyCursor(t *testing.T) {
 			}
 			if api.requests() != 1 {
 				t.Errorf("requests = %d", api.requests())
+			}
+		})
+	}
+}
+
+func TestTranscriptRowsKeepTheirOwnRaw(t *testing.T) {
+	for _, unknown := range []string{`"x_future":{"nested":[1,null,{"k":"v"}]},`, ""} {
+		t.Run(unknown, func(t *testing.T) {
+			row := `{` + unknown + `"id":"tr_1","title":"T","duration_seconds":5,"created_at":1760000000,"tags":[],"deleted_at":1760000010,"cause":"manual","receipt":{"x_receipt":{"future":true}}}`
+			api := newListAPI(t, func(path string, _ url.Values) (int, string) {
+				if path == "/v1/transcripts/deleted" {
+					return 200, `{"deleted":[` + row + `],"next_cursor":null}`
+				}
+				return 200, `{"transcripts":[` + row + `],"next_cursor":null}`
+			})
+			c := api.client(t)
+			page, err := c.Transcripts.Page(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(page.Items) != 1 {
+				t.Fatalf("rows = %d", len(page.Items))
+			}
+			if got := nestedRaw(t, page.Items[0]); got != row {
+				t.Errorf("summary Raw = %s, want %s", got, row)
+			}
+			rows, err := drain(c.Transcripts.Deleted(context.Background()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 1 {
+				t.Fatalf("deleted rows = %d", len(rows))
+			}
+			if got := nestedRaw(t, rows[0]); got != row {
+				t.Errorf("deleted Raw = %s, want %s", got, row)
 			}
 		})
 	}

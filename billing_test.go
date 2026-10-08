@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -571,6 +572,50 @@ func TestCanceledBillingCallsSendNothingAndCarryNoPurchaseKey(t *testing.T) {
 			e := wantCode(t, call(ctx, srv.client(t)), KindAbort, "aborted")
 			if e.Status != 0 || e.IdempotencyKey != "" || len(srv.all()) != 0 || !errors.Is(e, context.Canceled) {
 				t.Errorf("status %d, key %q, requests %v, cause %v", e.Status, e.IdempotencyKey, srv.all(), e.Unwrap())
+			}
+		})
+	}
+}
+
+func nestedRaw(t *testing.T, model any) string {
+	t.Helper()
+	field := reflect.ValueOf(model).FieldByName("Raw")
+	if !field.IsValid() {
+		t.Fatalf("%T has no Raw field", model)
+	}
+	raw, ok := field.Interface().(json.RawMessage)
+	if !ok {
+		t.Fatalf("%T.Raw is %T, want json.RawMessage", model, field.Interface())
+	}
+	return string(raw)
+}
+
+func TestNestedAccountLimitsAndJobOptionsKeepTheirOwnRaw(t *testing.T) {
+	for _, unknown := range []string{`null`, `""`, `"   "`, `"\t"`, `"\u2003"`, `false`, `0`, `[]`, `{"deeper":[1,null,"x"]}`} {
+		t.Run(unknown, func(t *testing.T) {
+			limits := `{"max_daily_seconds":9,"max_active_jobs":3,"active_jobs":1,"used_today_seconds":2,"future":` + unknown + `}`
+			accountServer := newScriptedServer(t, step{status: 200, headers: map[string]string{"Content-Type": "application/json"}, body: `{"balance_seconds":90,"held_seconds":10,"card_on_file":true,"data_region":"eu","credits_expire_at":null,"limits":` + limits + `}`})
+			account, err := newTestClient(t, accountServer.URL, newFakeClock()).Account(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if account.Limits.MaxDailySeconds != 9 || account.Limits.MaxActiveJobs != 3 || account.Limits.ActiveJobs != 1 || account.Limits.UsedTodaySeconds != 2 {
+				t.Fatalf("limits = %+v", account.Limits)
+			}
+			if raw := nestedRaw(t, account.Limits); raw != limits {
+				t.Errorf("limits Raw = %s, want %s", raw, limits)
+			}
+			options := `{"language_code":null,"speaker_detection":true,"translation_targets":["fr"],"future":` + unknown + `}`
+			jobServer := newScriptedServer(t, step{status: 200, headers: map[string]string{"Content-Type": "application/json"}, body: `{"id":"job_1","state":"done","created_at":1,"options":` + options + `}`})
+			job, err := newTestClient(t, jobServer.URL, newFakeClock()).Jobs.Get(context.Background(), "job_1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if job.Options.LanguageCode != "" || !job.Options.SpeakerDetection || strings.Join(job.Options.TranslationTargets, ",") != "fr" {
+				t.Fatalf("options = %+v", job.Options)
+			}
+			if raw := nestedRaw(t, job.Options); raw != options {
+				t.Errorf("options Raw = %s, want %s", raw, options)
 			}
 		})
 	}
