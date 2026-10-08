@@ -163,8 +163,8 @@ func TestAnUploadCreateWithoutAKeyIsStillPaced(t *testing.T) {
 			t.Fatalf("create %d: %v", i, err)
 		}
 	}
-	if len(clock.slept()) == 0 {
-		t.Error("the fifth create within a minute did not wait")
+	if waits := clock.slept(); len(waits) != 1 || waits[0] != time.Minute {
+		t.Errorf("create waits = %v, want exactly [1m0s]", waits)
 	}
 }
 

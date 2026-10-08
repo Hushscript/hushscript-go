@@ -230,32 +230,32 @@ func TestEveryErrorAfterThePurchaseWasSentCarriesTheKeyAndNeverRetriesTwice(t *t
 		check    func(*testing.T, *Error)
 	}{
 		"502 twice": {[]step{{status: 502, body: "x"}}, 2, func(t *testing.T, e *Error) {
-			if e.Kind != KindAPI || e.Status != 502 {
+			if e.Kind != KindAPI || e.Code != "http_502" || e.Status != 502 {
 				t.Errorf("error %+v", e)
 			}
 		}},
 		"connection lost twice": {[]step{{drop: true}}, 2, func(t *testing.T, e *Error) {
-			if e.Kind != KindNetwork {
+			if e.Kind != KindNetwork || e.Code != "network_error" || e.Status != 0 {
 				t.Errorf("error %+v", e)
 			}
 		}},
 		"4021": {[]step{{status: 403, body: jsonError("pat_purchase_requires_app", 4021)}}, 1, func(t *testing.T, e *Error) {
-			if e.Kind != KindPermissionDenied || e.NumericCode != 4021 || !strings.Contains(e.Hint, "Buy this pack in the Hushscript app.") {
+			if e.Kind != KindPermissionDenied || e.Code != "pat_purchase_requires_app" || e.Status != 403 || e.NumericCode != 4021 || !strings.Contains(e.Hint, "Buy this pack in the Hushscript app.") {
 				t.Errorf("error %+v", e)
 			}
 		}},
 		"4023": {[]step{{status: 403, body: jsonError("pat_purchase_requires_authentication", 4023)}}, 1, func(t *testing.T, e *Error) {
-			if e.Kind != KindPermissionDenied || e.NumericCode != 4023 || !strings.Contains(e.Hint, "Your bank wants to confirm this payment.") {
+			if e.Kind != KindPermissionDenied || e.Code != "pat_purchase_requires_authentication" || e.Status != 403 || e.NumericCode != 4023 || !strings.Contains(e.Hint, "Your bank wants to confirm this payment.") {
 				t.Errorf("error %+v", e)
 			}
 		}},
 		"declined card": {[]step{{status: 402, body: jsonError("insufficient_balance", 3001)}}, 1, func(t *testing.T, e *Error) {
-			if e.Kind != KindInsufficientBalance {
+			if e.Kind != KindInsufficientBalance || e.Code != "insufficient_balance" || e.NumericCode != 3001 || e.Status != 402 {
 				t.Errorf("error %+v", e)
 			}
 		}},
 		"429": {[]step{{status: 429, body: jsonError("agent_purchase_capped", 4038), headers: map[string]string{"Retry-After": "3600"}}}, 1, func(t *testing.T, e *Error) {
-			if e.Kind != KindRateLimit || e.RetryAfter != time.Hour {
+			if e.Kind != KindRateLimit || e.Code != "agent_purchase_capped" || e.Status != 429 || e.RetryAfter != time.Hour {
 				t.Errorf("error %+v", e)
 			}
 		}},
@@ -479,5 +479,99 @@ func TestTransactionsLedgerAndHoldsPageThroughTheirCursors(t *testing.T) {
 	}
 	if got := api.to("GET /v1/billing/holds"); len(got) != 2 || got[1].query != "cursor=c2" {
 		t.Errorf("holds requests = %v", got)
+	}
+}
+
+func TestSetDefaultCardFailuresAreNotRetriedAfterSend(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		answer step
+		kind   ErrorKind
+		code   string
+		status int
+	}{
+		{"bad request", step{status: 400, body: jsonError("invalid_request", 1000)}, KindValidation, "invalid_request", 400},
+		{"forbidden", step{status: 403, body: jsonError("forbidden", 2000)}, KindPermissionDenied, "forbidden", 403},
+		{"not found", step{status: 404, body: jsonError("not_found", 4040)}, KindNotFound, "not_found", 404},
+		{"unprocessable", step{status: 422, body: jsonError("invalid_request", 1000)}, KindValidation, "invalid_request", 422},
+		{"lost answer", step{drop: true}, KindNetwork, "network_error", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newRouteServer(t, func(recorded, int) step { return tc.answer })
+			e := wantCode(t, srv.client(t).Billing.SetDefaultCard(context.Background(), "pm_1"), tc.kind, tc.code)
+			if e.Status != tc.status || len(srv.all()) != 1 || len(srv.to("POST /v1/billing/cards/default")) != 1 {
+				t.Errorf("status %d, requests %v", e.Status, srv.all())
+			}
+		})
+	}
+}
+
+func TestAddCardURLFailuresRespectThePurchaseRetryBudget(t *testing.T) {
+	for _, tc := range []struct {
+		status, requests int
+		kind             ErrorKind
+	}{
+		{400, 1, KindValidation},
+		{403, 1, KindPermissionDenied},
+		{404, 1, KindNotFound},
+		{422, 1, KindValidation},
+		{500, 1, KindAPI},
+		{503, 2, KindAPI},
+	} {
+		t.Run(itoa(tc.status), func(t *testing.T) {
+			srv := newRouteServer(t, func(recorded, int) step { return step{status: tc.status, body: "unavailable"} })
+			_, err := srv.client(t).Billing.AddCardURL(context.Background())
+			e := wantCode(t, err, tc.kind, "http_"+itoa(tc.status))
+			sent := srv.to("POST /v1/billing/setup-session")
+			if e.Status != tc.status || len(sent) != tc.requests || len(srv.all()) != tc.requests {
+				t.Fatalf("status %d, requests %v, want %d", e.Status, srv.all(), tc.requests)
+			}
+			if tc.requests == 2 && sent[0].body != sent[1].body {
+				t.Errorf("retry changed the keyed body: %v", sent)
+			}
+		})
+	}
+}
+
+func TestCanceledBillingCallsSendNothingAndCarryNoPurchaseKey(t *testing.T) {
+	calls := map[string]func(context.Context, *Client) error{
+		"Client.Buy": func(ctx context.Context, c *Client) error { _, err := c.Buy(ctx, "45min", nil); return err },
+		"Billing.Buy": func(ctx context.Context, c *Client) error {
+			_, err := c.Billing.Buy(ctx, "45min", &BuyOptions{IdempotencyKey: "caller-key"})
+			return err
+		},
+		"Packs":          func(ctx context.Context, c *Client) error { _, err := c.Billing.Packs(ctx); return err },
+		"Cards":          func(ctx context.Context, c *Client) error { _, err := c.Billing.Cards(ctx); return err },
+		"SetDefaultCard": func(ctx context.Context, c *Client) error { return c.Billing.SetDefaultCard(ctx, "pm_1") },
+		"AddCardURL":     func(ctx context.Context, c *Client) error { _, err := c.Billing.AddCardURL(ctx); return err },
+		"Transactions": func(ctx context.Context, c *Client) error {
+			for _, err := range c.Billing.Transactions(ctx) {
+				return err
+			}
+			return nil
+		},
+		"Ledger": func(ctx context.Context, c *Client) error {
+			for _, err := range c.Billing.Ledger(ctx) {
+				return err
+			}
+			return nil
+		},
+		"Holds": func(ctx context.Context, c *Client) error {
+			for _, err := range c.Billing.Holds(ctx) {
+				return err
+			}
+			return nil
+		},
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			srv := newRouteServer(t, func(recorded, int) step { return step{status: 403, body: jsonError("forbidden", 2000)} })
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			e := wantCode(t, call(ctx, srv.client(t)), KindAbort, "aborted")
+			if e.Status != 0 || e.IdempotencyKey != "" || len(srv.all()) != 0 || !errors.Is(e, context.Canceled) {
+				t.Errorf("status %d, key %q, requests %v, cause %v", e.Status, e.IdempotencyKey, srv.all(), e.Unwrap())
+			}
+		})
 	}
 }

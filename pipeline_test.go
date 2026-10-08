@@ -202,12 +202,12 @@ func TestWhenDirectNeverWorksEveryPartGoesThroughTheAPIOnce(t *testing.T) {
 		}
 		return 0, "", false
 	})
-	mustTranscribe(t, r, nil)
+	mustTranscribe(t, r, &TranscribeOptions{Concurrency: 1})
 	if n := r.api.count("part"); n != 4 {
 		t.Errorf("proxied parts = %d, want 4", n)
 	}
-	if n := r.api.count("r2"); n < 1 {
-		t.Errorf("direct attempts = %d, want at least 1", n)
+	if n := r.api.count("r2"); n != 4 {
+		t.Errorf("direct attempts = %d, want 4 before fallback", n)
 	}
 	if n := r.api.count("complete"); n != 1 {
 		t.Errorf("complete = %d", n)
@@ -300,9 +300,9 @@ func TestAnExpiredPartURLIsRefreshedAfterAForbidden(t *testing.T) {
 		}
 		return 0, "", false
 	})
-	mustTranscribe(t, r, nil)
-	if r.api.count("partUrls") < 1 || r.api.count("part") != 0 {
-		t.Errorf("part-urls %d, proxied %d", r.api.count("partUrls"), r.api.count("part"))
+	mustTranscribe(t, r, &TranscribeOptions{Concurrency: 1})
+	if r.api.count("partUrls") != 1 || r.api.count("part") != 0 || r.api.count("r2") != 5 {
+		t.Errorf("part-urls %d, proxied %d, direct %d; want 1, 0, 5", r.api.count("partUrls"), r.api.count("part"), r.api.count("r2"))
 	}
 }
 
@@ -690,6 +690,228 @@ func TestJobsWaitTimesOutWithoutAResumeToken(t *testing.T) {
 	_ = wantCode(t, err, KindConfiguration, "config_invalid")
 }
 
+func TestPipelineAcceptsInclusiveOptionLimits(t *testing.T) {
+	keyterms := make([]string, 1000)
+	for i := range keyterms {
+		keyterms[i] = fmt.Sprintf("term%d", i)
+	}
+	for name, opts := range map[string]*TranscribeOptions{
+		"16-character key":    {IdempotencyKey: strings.Repeat("k", 16)},
+		"128-character key":   {IdempotencyKey: strings.Repeat("k", 128)},
+		"1000 keyterms":       {Keyterms: keyterms},
+		"64 multibyte runes":  {MatterCode: strings.Repeat("é", 64)},
+		"default concurrency": {Concurrency: 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			mustTranscribe(t, r, opts)
+			creates := r.api.requests("create")
+			if len(creates) != 1 {
+				t.Fatalf("creates = %d, want 1", len(creates))
+			}
+			var body createBody
+			if err := json.Unmarshal(creates[0].body, &body); err != nil {
+				t.Fatal(err)
+			}
+			if opts.IdempotencyKey != "" && body.IdempotencyKey != opts.IdempotencyKey {
+				t.Errorf("key = %q", body.IdempotencyKey)
+			}
+			if body.MatterCode != opts.MatterCode {
+				t.Errorf("matter code = %q", body.MatterCode)
+			}
+			if opts.Keyterms != nil && (body.TranscriptionOptions == nil || len(body.TranscriptionOptions.KeytermsPrompt) != 1000) {
+				t.Errorf("keyterms = %+v", body.TranscriptionOptions)
+			}
+		})
+	}
+}
+
+func TestDailyLimitEqualityAllowsTheCreate(t *testing.T) {
+	r := newRig(t)
+	r.api.maxDaily, r.api.usedToday = 600, 580
+	mustTranscribe(t, r, &TranscribeOptions{DurationSeconds: 20})
+	if r.api.count("account") != 1 || r.api.count("create") != 1 {
+		t.Errorf("account/create = %d/%d, want 1/1", r.api.count("account"), r.api.count("create"))
+	}
+}
+
+func TestAnEmptyTranscribePathIsUnreadableBeforeAnyRequest(t *testing.T) {
+	r := newRig(t)
+	_, err := r.client.Transcribe(context.Background(), "", nil)
+	e := wantCode(t, err, KindPreflight, "file_unreadable")
+	if e.Status != 0 || r.api.total() != 0 {
+		t.Errorf("status = %d, requests = %d; want 0, 0", e.Status, r.api.total())
+	}
+}
+
+func TestExactlyFiveGigabytesPassesPreflightWithoutReadingTheWholeFile(t *testing.T) {
+	r := newRig(t)
+	r.api.setHook(func(s *seen) (int, string, bool) {
+		if s.route == "create" {
+			return 402, `{"error":"insufficient_balance","code":3001}`, true
+		}
+		return 0, "", false
+	})
+	const size = int64(5_000_000_000)
+	_, err := r.client.TranscribeReader(context.Background(), newZeroWAV(size), size, &TranscribeOptions{DurationSeconds: 20})
+	e := wantCode(t, err, KindInsufficientBalance, "insufficient_balance")
+	if e.Status != 402 || r.api.count("account") != 1 || r.api.count("create") != 1 || r.api.count("r2") != 0 {
+		t.Errorf("status = %d, account/create/r2 = %d/%d/%d", e.Status, r.api.count("account"), r.api.count("create"), r.api.count("r2"))
+	}
+	var body createBody
+	if err := json.Unmarshal(r.api.requests("create")[0].body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.SizeBytes != size {
+		t.Errorf("size = %d, want %d", body.SizeBytes, size)
+	}
+}
+
+func TestPartURLAgeRefreshesOnlyAfterTwentyThreeHours(t *testing.T) {
+	for _, age := range []time.Duration{23 * time.Hour, 23*time.Hour + time.Second} {
+		t.Run(age.String(), func(t *testing.T) {
+			r := newRig(t)
+			r.api.setHook(func(s *seen) (int, string, bool) {
+				if age > 23*time.Hour && s.route == "r2" && s.n == 2 && r.api.count("partUrls") != 1 {
+					t.Error("the second PUT used a URL older than 23 hours before refreshing its page")
+				}
+				return 0, "", false
+			})
+			r.client.core.uploadTrace = func(event string, part int) {
+				if event == "direct-success" && part == 1 {
+					r.clock.advance(age)
+				}
+			}
+			mustTranscribe(t, r, &TranscribeOptions{Concurrency: 1})
+			want := 0
+			if age > 23*time.Hour {
+				want = 1
+			}
+			if r.api.count("partUrls") != want || r.api.count("r2") != 4 || r.api.count("part") != 0 {
+				t.Fatalf("page/direct/proxied = %d/%d/%d, want %d/4/0", r.api.count("partUrls"), r.api.count("r2"), r.api.count("part"), want)
+			}
+			if want == 1 {
+				refresh := r.api.requests("partUrls")[0]
+				second := r.api.requests("r2")[1]
+				if refresh.at.After(second.at) || refresh.query != "start=1" {
+					t.Errorf("refresh = %+v, second PUT = %+v", refresh, second)
+				}
+			}
+		})
+	}
+}
+
+func TestAllTranscribeInputsValidateRuntimeOptionsBeforeRequests(t *testing.T) {
+	for _, input := range []string{"path", "reader", "stream"} {
+		for name, tc := range map[string]struct {
+			opts TranscribeOptions
+			kind ErrorKind
+			code string
+		}{
+			"concurrency -1":    {opts: TranscribeOptions{Concurrency: -1, DurationSeconds: 20}, kind: KindPreflight, code: "invalid_option"},
+			"concurrency 9":     {opts: TranscribeOptions{Concurrency: 9, DurationSeconds: 20}, kind: KindPreflight, code: "invalid_option"},
+			"duration NaN":      {opts: TranscribeOptions{DurationSeconds: math.NaN()}, kind: KindPreflight, code: "invalid_option"},
+			"duration +Inf":     {opts: TranscribeOptions{DurationSeconds: math.Inf(1)}, kind: KindPreflight, code: "invalid_option"},
+			"duration -Inf":     {opts: TranscribeOptions{DurationSeconds: math.Inf(-1)}, kind: KindPreflight, code: "invalid_option"},
+			"wait timeout -1":   {opts: TranscribeOptions{WaitTimeout: -time.Second, DurationSeconds: 20}, kind: KindPreflight, code: "invalid_option"},
+			"duration -1":       {opts: TranscribeOptions{DurationSeconds: -1}, kind: KindPreflight, code: "invalid_option"},
+			"duration 14.99":    {opts: TranscribeOptions{DurationSeconds: 14.99}, kind: KindFileLimit, code: "duration_out_of_range"},
+			"duration 36000.01": {opts: TranscribeOptions{DurationSeconds: 36000.01}, kind: KindFileLimit, code: "duration_out_of_range"},
+		} {
+			t.Run(input+"/"+name, func(t *testing.T) {
+				r := newRig(t)
+				var err error
+				switch input {
+				case "path":
+					path := filepath.Join(t.TempDir(), "audio.wav")
+					if e := os.WriteFile(path, r.wav, 0o600); e != nil {
+						t.Fatal(e)
+					}
+					_, err = r.client.Transcribe(context.Background(), path, &tc.opts)
+				case "reader":
+					_, err = r.transcribe(&tc.opts)
+				case "stream":
+					_, err = r.client.TranscribeStream(context.Background(), bytes.NewReader(r.wav), int64(len(r.wav)), &tc.opts)
+				}
+				e := wantCode(t, err, tc.kind, tc.code)
+				if e.Status != 0 || r.api.total() != 0 {
+					t.Errorf("status/requests = %d/%d, want 0/0", e.Status, r.api.total())
+				}
+			})
+		}
+	}
+}
+
+func TestAllTranscribeInputsAcceptDurationBoundariesAndDefaultConcurrency(t *testing.T) {
+	for _, input := range []string{"path", "reader", "stream"} {
+		for _, seconds := range []float64{15, 36000} {
+			t.Run(fmt.Sprintf("%s/%g", input, seconds), func(t *testing.T) {
+				r := newRig(t)
+				opts := &TranscribeOptions{DurationSeconds: seconds, Concurrency: 0}
+				var got *Transcript
+				var err error
+				switch input {
+				case "path":
+					path := filepath.Join(t.TempDir(), "audio.wav")
+					if e := os.WriteFile(path, r.wav, 0o600); e != nil {
+						t.Fatal(e)
+					}
+					got, err = r.client.Transcribe(context.Background(), path, opts)
+				case "reader":
+					got, err = r.transcribe(opts)
+				case "stream":
+					got, err = r.client.TranscribeStream(context.Background(), bytes.NewReader(r.wav), int64(len(r.wav)), opts)
+				}
+				if err != nil || got == nil || got.ID != "tr_1" {
+					t.Fatalf("Transcribe = %v, %v", got, err)
+				}
+				creates := r.api.requests("create")
+				if len(creates) != 1 {
+					t.Fatalf("creates = %d, want 1", len(creates))
+				}
+				var body createBody
+				if err := json.Unmarshal(creates[0].body, &body); err != nil {
+					t.Fatal(err)
+				}
+				if body.DurationSeconds != int(seconds) {
+					t.Errorf("declared duration = %d, want %g", body.DurationSeconds, seconds)
+				}
+			})
+		}
+	}
+}
+
+func TestCanceledPipelineCallsAbortBeforeAnyRequest(t *testing.T) {
+	for _, input := range []string{"path", "reader", "stream", "resume"} {
+		t.Run(input, func(t *testing.T) {
+			r := newRig(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			opts := &TranscribeOptions{DurationSeconds: 20}
+			var err error
+			switch input {
+			case "path":
+				path := filepath.Join(t.TempDir(), "audio.wav")
+				if e := os.WriteFile(path, r.wav, 0o600); e != nil {
+					t.Fatal(e)
+				}
+				_, err = r.client.Transcribe(ctx, path, opts)
+			case "reader":
+				_, err = r.client.TranscribeReader(ctx, bytes.NewReader(r.wav), int64(len(r.wav)), opts)
+			case "stream":
+				_, err = r.client.TranscribeStream(ctx, bytes.NewReader(r.wav), int64(len(r.wav)), opts)
+			case "resume":
+				token := encodeResumeToken(resumeState{JobID: "job_1", IdempotencyKey: strings.Repeat("k", 16), Size: int64(len(r.wav)), DurationSeconds: 20})
+				_, err = r.client.Resume(ctx, token, &ResumeOptions{Reader: bytes.NewReader(r.wav), Size: int64(len(r.wav))})
+			}
+			e := wantCode(t, err, KindAbort, "aborted")
+			if e.Status != 0 || r.api.total() != 0 {
+				t.Errorf("status/requests = %d/%d, want 0/0", e.Status, r.api.total())
+			}
+		})
+	}
+}
+
 func TestInvalidOptionsAreRefusedBeforeAnyRequestAndNeverClamped(t *testing.T) {
 	r := newRig(t)
 	for name, opts := range map[string]*TranscribeOptions{
@@ -701,6 +923,7 @@ func TestInvalidOptionsAreRefusedBeforeAnyRequestAndNeverClamped(t *testing.T) {
 		"duration -Inf":          {DurationSeconds: math.Inf(-1)},
 		"duration negative":      {DurationSeconds: -5},
 		"short key":              {IdempotencyKey: "short"},
+		"15-character key":       {IdempotencyKey: strings.Repeat("k", 15)},
 		"long key":               {IdempotencyKey: strings.Repeat("k", 129)},
 		"key with a newline":     {IdempotencyKey: "0123456789abcdef\n"},
 		"key with a space":       {IdempotencyKey: "0123456789abcde f"},
@@ -711,6 +934,7 @@ func TestInvalidOptionsAreRefusedBeforeAnyRequestAndNeverClamped(t *testing.T) {
 		"too many keyterms":      {Keyterms: make([]string, 1001)},
 		"a keyterm of 7 words":   {Keyterms: []string{"one two three four five six seven"}},
 		"matter code too long":   {MatterCode: strings.Repeat("m", 65)},
+		"65 multibyte runes":     {MatterCode: strings.Repeat("é", 65)},
 		"a keyterm of 7, spaced": {Keyterms: []string{"  a  b c d e f g "}},
 	} {
 		_, err := r.transcribe(opts)
@@ -734,10 +958,10 @@ func TestInvalidOptionsAreRefusedBeforeAnyRequestAndNeverClamped(t *testing.T) {
 
 func TestADurationOutsideFifteenToThirtySixThousandSecondsIsAFileLimitErrorWithNoRequest(t *testing.T) {
 	r := newRig(t)
-	for name, seconds := range map[string]float64{"14.9": 14.9, "10": 10, "36000.5": 36000.5, "50000": 50000} {
+	for name, seconds := range map[string]float64{"14.99": 14.99, "10": 10, "36000.01": 36000.01, "50000": 50000} {
 		_, err := r.transcribe(&TranscribeOptions{DurationSeconds: seconds})
 		e := wantCode(t, err, KindFileLimit, "duration_out_of_range")
-		if !strings.Contains(e.Hint, "between 15 seconds and 10 hours") {
+		if e.Status != 0 || !strings.Contains(e.Hint, "between 15 seconds and 10 hours") {
 			t.Errorf("%s: hint %q", name, e.Hint)
 		}
 	}
@@ -797,12 +1021,19 @@ func TestTheReaderSizeMustBePositiveAndAtMostFiveGigabytes(t *testing.T) {
 	r := newRig(t)
 	for _, size := range []int64{0, -1} {
 		_, err := r.client.TranscribeReader(context.Background(), bytes.NewReader(r.wav), size, nil)
-		_ = wantCode(t, err, KindPreflight, "invalid_option")
+		if e := wantCode(t, err, KindPreflight, "invalid_option"); e.Status != 0 {
+			t.Errorf("status = %d, want 0", e.Status)
+		}
 	}
 	_, err := r.client.TranscribeReader(context.Background(), bytes.NewReader(r.wav), 5_000_000_001, &TranscribeOptions{DurationSeconds: 20})
-	_ = wantCode(t, err, KindFileLimit, "size_out_of_range")
+	e := wantCode(t, err, KindFileLimit, "size_out_of_range")
+	if e.Status != 0 || e.Hint != "Files must be at most 5 GB." {
+		t.Errorf("size error = %+v", e)
+	}
 	_, err = r.client.TranscribeReader(context.Background(), nil, 100, nil)
-	_ = wantCode(t, err, KindPreflight, "invalid_option")
+	if e := wantCode(t, err, KindPreflight, "invalid_option"); e.Status != 0 {
+		t.Errorf("status = %d, want 0", e.Status)
+	}
 	if r.api.total() != 0 {
 		t.Errorf("%d requests", r.api.total())
 	}
@@ -834,7 +1065,7 @@ func TestTheServers402AtCreateIsTheOnlyBalanceRefusalAndCarriesItsNumbersInTheHi
 	if e.Status != 402 || r.api.count("create") != 1 || r.api.count("part") != 0 || r.api.count("r2") != 0 {
 		t.Errorf("status %d, creates %d, parts %d/%d", e.Status, r.api.count("create"), r.api.count("part"), r.api.count("r2"))
 	}
-	if !strings.Contains(e.Hint, "21 needed, 10 available") && !strings.Contains(e.Hint, "needed") {
+	if e.Hint != "Not enough minutes: 1 needed, 0 available. Buy a pack with the SDK's buy method or in the app." {
 		t.Errorf("hint %q", e.Hint)
 	}
 	if e.Details["needed_seconds"] != float64(21) || e.Details["balance_seconds"] != float64(10) {
@@ -1144,12 +1375,15 @@ func TestThePartTimeoutIs300SecondsAndTheDefaultIsSixtyForTheRest(t *testing.T) 
 }
 
 func TestNoMoreThanConcurrencyPartsAreInFlight(t *testing.T) {
-	for _, concurrency := range []int{1, 2, 3} {
+	for _, concurrency := range []int{0, 1, 2, 3, 8} {
 		clock := newVirtualClock()
 		api := newFakeAPI(t, clock)
 		api.partSize = 16_000
 		clock.run(t, api)
 		release := make(chan struct{})
+		var releaseOnce sync.Once
+		finish := func() { releaseOnce.Do(func() { close(release) }) }
+		t.Cleanup(finish)
 		api.heldR2 = release
 		client := pipelineClient(t, api, clock)
 		wav := testWAV(20)
@@ -1158,12 +1392,16 @@ func TestNoMoreThanConcurrencyPartsAreInFlight(t *testing.T) {
 			_, err := client.TranscribeReader(context.Background(), bytes.NewReader(wav), int64(len(wav)), &TranscribeOptions{Concurrency: concurrency})
 			done <- err
 		}()
-		waitFor(t, func() bool { return api.r2Active.Load() == int64(concurrency) })
+		want := concurrency
+		if want == 0 {
+			want = 4
+		}
+		waitFor(t, func() bool { return api.r2Active.Load() == int64(want) })
 		time.Sleep(30 * time.Millisecond)
-		if peak := api.r2Peak.Load(); peak != int64(concurrency) {
+		if peak := api.r2Peak.Load(); peak != int64(want) {
 			t.Errorf("concurrency %d: %d parts in flight", concurrency, peak)
 		}
-		close(release)
+		finish()
 		if err := <-done; err != nil {
 			t.Fatal(err)
 		}

@@ -191,7 +191,11 @@ func TestFillsTheInsufficientBalanceHintInMinutes(t *testing.T) {
 
 func TestHasNoHintForASlugWithoutOne(t *testing.T) {
 	e := fromResponse(404, nil, jsonError("not_found", 6000), http.MethodGet, "/v1/jobs/x")
-	if _, listed := generated.Hint("not_found"); !listed && e.Hint != "" {
+	assertCoreError(t, e, KindNotFound, "not_found", 404)
+	if _, listed := generated.Hint("not_found"); listed {
+		t.Fatal("not_found now has a hint; choose a slug absent from the hint catalog")
+	}
+	if e.Hint != "" {
 		t.Errorf("hint = %q for a slug without one", e.Hint)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -53,10 +54,19 @@ type Transcript struct {
 }
 
 type utteranceBody struct {
-	Speaker string  `json:"speaker"`
-	StartMs float64 `json:"start_ms"`
-	EndMs   float64 `json:"end_ms"`
-	Text    string  `json:"text"`
+	Speaker string          `json:"speaker"`
+	StartMs timestampNumber `json:"start_ms"`
+	EndMs   timestampNumber `json:"end_ms"`
+	Text    string          `json:"text"`
+}
+
+type timestampNumber json.Number
+
+func (n *timestampNumber) UnmarshalJSON(data []byte) error {
+	if len(data) > 0 && data[0] == '"' {
+		return errors.New("hushscript: an utterance timestamp must be a number")
+	}
+	return json.Unmarshal(data, (*json.Number)(n))
 }
 
 type transcriptBody struct {
@@ -138,7 +148,11 @@ func parseTranscript(data []byte) (*Transcript, error) {
 		at := unixTime(*body.AutoDeleteAt)
 		t.AutoDeleteAt = &at
 	}
-	t.Utterances = utterancesOf(body.Body.Original.Utterances, names)
+	var err error
+	t.Utterances, err = utterancesOf(body.Body.Original.Utterances, names)
+	if err != nil {
+		return nil, err
+	}
 
 	var translations map[string]struct {
 		Utterances []utteranceBody `json:"utterances"`
@@ -152,7 +166,10 @@ func parseTranscript(data []byte) (*Transcript, error) {
 			return nil, fmt.Errorf("hushscript: reading the translations of a transcript: %w", err)
 		}
 		for _, locale := range order {
-			t.translations[locale] = utterancesOf(translations[locale].Utterances, names)
+			t.translations[locale], err = utterancesOf(translations[locale].Utterances, names)
+			if err != nil {
+				return nil, err
+			}
 			if locale != reservedCleaned {
 				t.Languages = append(t.Languages, locale)
 			}
@@ -188,15 +205,41 @@ func objectKeys(raw json.RawMessage) ([]string, error) {
 	return keys, nil
 }
 
-func utterancesOf(raw []utteranceBody, names map[string]string) []Utterance {
+func utterancesOf(raw []utteranceBody, names map[string]string) ([]Utterance, error) {
 	out := make([]Utterance, len(raw))
 	for i, u := range raw {
+		start, startOK := timestampMs(json.Number(u.StartMs))
+		end, endOK := timestampMs(json.Number(u.EndMs))
+		if !startOK || !endOK {
+			return nil, errors.New("hushscript: an utterance timestamp is out of range")
+		}
 		out[i] = Utterance{
 			Speaker: u.Speaker, SpeakerName: displayName(u.Speaker, names),
-			StartMs: int(math.Floor(u.StartMs)), EndMs: int(math.Floor(u.EndMs)), Text: u.Text,
+			StartMs: start, EndMs: end, Text: u.Text,
 		}
 	}
-	return out
+	return out, nil
+}
+
+func timestampMs(value json.Number) (int, bool) {
+	if value == "" {
+		return 0, true
+	}
+	if whole, err := strconv.ParseInt(string(value), 10, strconv.IntSize); err == nil {
+		return int(whole), true
+	} else if errors.Is(err, strconv.ErrRange) {
+		return 0, false
+	}
+	fraction, err := strconv.ParseFloat(string(value), 64)
+	if err != nil {
+		return 0, false
+	}
+	whole := math.Floor(fraction)
+	bound := math.Ldexp(1, strconv.IntSize-1)
+	if math.IsNaN(whole) || math.IsInf(whole, 0) || whole < -bound || whole >= bound {
+		return 0, false
+	}
+	return int(whole), true
 }
 
 // displayName is the saved name if it is not blank, else "" for a blank label, else "Speaker {label}".

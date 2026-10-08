@@ -94,7 +94,8 @@ services:
       - -c
       - >-
         go build ./...
-        && test -z "$(go tool -modfile=tools/go.mod gofumpt -l $(find . -name '*.go' -not -path './generated/*'))"
+        && formatted="$(go tool -modfile=tools/go.mod gofumpt -l $(find . -name '*.go' -not -path './generated/*'))"
+        && test -z "$$formatted"
         && timeout 900 golangci-lint run ./...
 
   conformance:

@@ -55,6 +55,26 @@ type errorExpect struct {
 	HintContains    string         `json:"hintContains"`
 	Fields          map[string]any `json:"fields"`
 	MessageExcludes []string       `json:"messageExcludes"`
+	numericCodeSet  bool
+	statusSet       bool
+	retryAfterSet   bool
+}
+
+func (e *errorExpect) UnmarshalJSON(data []byte) error {
+	type plain errorExpect
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*e = errorExpect(decoded)
+	_, e.numericCodeSet = fields["numericCode"]
+	_, e.statusSet = fields["status"]
+	_, e.retryAfterSet = fields["retryAfter"]
+	return nil
 }
 
 // env is what a mapped op works with: the client, the media downloaded from the mock, and the resume
@@ -506,14 +526,32 @@ func checkError(err error, want *errorExpect) []string {
 	if want.Code != "" && sdkErr.Code != want.Code {
 		add("code %q, want %q", sdkErr.Code, want.Code)
 	}
-	if want.NumericCode != nil && sdkErr.NumericCode != *want.NumericCode {
-		add("numericCode %d, want %d", sdkErr.NumericCode, *want.NumericCode)
+	if want.numericCodeSet || want.NumericCode != nil {
+		value := 0
+		if want.NumericCode != nil {
+			value = *want.NumericCode
+		}
+		if sdkErr.NumericCode != value {
+			add("numericCode %d, want %d", sdkErr.NumericCode, value)
+		}
 	}
-	if want.Status != nil && sdkErr.Status != *want.Status {
-		add("status %d, want %d", sdkErr.Status, *want.Status)
+	if want.statusSet || want.Status != nil {
+		value := 0
+		if want.Status != nil {
+			value = *want.Status
+		}
+		if sdkErr.Status != value {
+			add("status %d, want %d", sdkErr.Status, value)
+		}
 	}
-	if want.RetryAfter != nil && sdkErr.RetryAfter.Seconds() != *want.RetryAfter {
-		add("retryAfter %v, want %v s", sdkErr.RetryAfter, *want.RetryAfter)
+	if want.retryAfterSet || want.RetryAfter != nil {
+		value := 0.0
+		if want.RetryAfter != nil {
+			value = *want.RetryAfter
+		}
+		if sdkErr.RetryAfter.Seconds() != value {
+			add("retryAfter %v, want %v s", sdkErr.RetryAfter, value)
+		}
 	}
 	if want.HintContains != "" && !strings.Contains(sdkErr.Hint, want.HintContains) {
 		add("hint %q lacks %q", sdkErr.Hint, want.HintContains)

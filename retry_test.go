@@ -3,8 +3,10 @@ package hushscript
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -38,7 +40,7 @@ func TestClassifiesOperationsByTheRetryTable(t *testing.T) {
 		{"PATCH", "/v1/org/members/u1", classMutate},
 		{"DELETE", "/v1/org/transcripts/t1/hold", classMutate},
 		{"POST", "/v1/org/transcripts/t1/hold", classMutate},
-		{"PUT", "/v1/billing/cards/default", classMutate},
+		{"POST", "/v1/billing/cards/default", classMutate},
 		{"POST", "/v1/anything/new", classMutate},
 	}
 	for _, tc := range cases {
@@ -229,7 +231,8 @@ func TestNeverRetriesClaimOrRotateAndReportsAnUnknownOutcome(t *testing.T) {
 		c := newTestClient(t, srv.URL, newFakeClock())
 		_, err := do(t, c, http.MethodPost, path, `{}`)
 		e := asError(t, err)
-		if e.Kind != KindOutcomeUnknown || srv.count() != 1 {
+		var cause net.Error
+		if e.Kind != KindOutcomeUnknown || e.Code != "outcome_unknown" || e.Status != 0 || !errors.As(err, &cause) || srv.count() != 1 {
 			t.Errorf("%s: kind %v, %d requests", path, e.Kind, srv.count())
 		}
 		if strings.Contains(path, "claim") && !strings.Contains(e.Hint, "agent_claim_invalid") {
@@ -241,7 +244,7 @@ func TestNeverRetriesClaimOrRotateAndReportsAnUnknownOutcome(t *testing.T) {
 		srv = newScriptedServer(t, step{status: 503}, okBody)
 		c = newTestClient(t, srv.URL, newFakeClock())
 		_, err = do(t, c, http.MethodPost, path, `{}`)
-		if e := asError(t, err); e.Status != 503 || srv.count() != 1 {
+		if e := asError(t, err); e.Kind != KindAPI || e.Code != "http_503" || e.Status != 503 || srv.count() != 1 {
 			t.Errorf("%s on 503: %+v, %d requests", path, e, srv.count())
 		}
 	}
@@ -257,10 +260,13 @@ func TestNeverRetriesSignupAndReportsAnUnknownOutcome(t *testing.T) {
 }
 
 func TestRefusedConnectionOfAnUnsentClaimIsANetworkErrorNotAnUnknownOutcome(t *testing.T) {
-	c := newTestClient(t, deadAddress(t), newFakeClock())
-	_, err := do(t, c, http.MethodPost, "/v1/agent/credentials/rotate", `{}`)
-	if e := asError(t, err); e.Kind != KindNetwork {
-		t.Errorf("kind = %v: nothing was sent, so the outcome is known", e.Kind)
+	for _, path := range []string{"/v1/agent/accounts/sg_1/claim", "/v1/agent/credentials/rotate"} {
+		c := newTestClient(t, deadAddress(t), newFakeClock())
+		_, err := do(t, c, http.MethodPost, path, `{}`)
+		e := wantCode(t, err, KindNetwork, "network_error")
+		if e.Status != 0 {
+			t.Errorf("%s: status %d on an unsent request", path, e.Status)
+		}
 	}
 }
 

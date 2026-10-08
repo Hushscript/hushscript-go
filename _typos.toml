@@ -3,3 +3,5 @@ extend-exclude = ["openapi.json", "go.mod", "go.sum", "generated/**", "LICENSE"]
 
 [default.extend-words]
 JOD = "JOD"
+# go-mutesting prints "UNKOWN exit code for"; the mutation gate matches it verbatim
+unkown = "unkown"

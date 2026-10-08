@@ -2,6 +2,7 @@ package hushscript
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -212,7 +213,7 @@ func TestAPageThatRepeatsTheCursorItWasSentIsAPaginationLoop(t *testing.T) {
 		return 200, rowsPage(3, 4, "same")
 	})
 	items, err := drain(api.client(t).Transcripts.List(context.Background(), nil))
-	e := wantCode(t, err, KindAPI, "pagination_loop")
+	e := wantCode(t, err, KindUnexpected, "pagination_loop")
 	if len(items) != 4 || api.requests() != 2 {
 		t.Errorf("items %d, requests %d: the page that looped is still yielded and nothing is fetched after it", len(items), api.requests())
 	}
@@ -530,4 +531,82 @@ func TestBalanceErrorsKeepTheAPIsStatusAndACancelledContextIsAnAbort(t *testing.
 	_ = wantCode(t, err, KindAbort, "aborted")
 	_, err = api.client(t).Transcripts.Page(ctx, nil)
 	_ = wantCode(t, err, KindAbort, "aborted")
+}
+
+func TestTranscriptPageSizeUsesZeroAsUnsetAndRejectsNegative(t *testing.T) {
+	for name, run := range map[string]func(*Client, int) error{
+		"list": func(c *Client, size int) error {
+			_, err := drain(c.Transcripts.List(context.Background(), &ListOptions{PageSize: size}))
+			return err
+		},
+		"page": func(c *Client, size int) error {
+			_, err := c.Transcripts.Page(context.Background(), &PageOptions{PageSize: size})
+			return err
+		},
+	} {
+		for _, size := range []int{-1, 0} {
+			t.Run(fmt.Sprintf("%s/%d", name, size), func(t *testing.T) {
+				api := newListAPI(t, func(_ string, query url.Values) (int, string) {
+					if _, ok := query["limit"]; ok {
+						t.Errorf("zero PageSize sent limit: %v", query)
+					}
+					return 200, rowsPage(1, 1, "")
+				})
+				err := run(api.client(t), size)
+				if size < 0 {
+					assertCoreError(t, err, KindPreflight, "invalid_option", 0)
+					if api.requests() != 0 {
+						t.Errorf("invalid PageSize sent %d requests", api.requests())
+					}
+				} else if err != nil || api.requests() != 1 {
+					t.Errorf("unset PageSize: %d requests, %v", api.requests(), err)
+				}
+			})
+		}
+	}
+}
+
+func TestReadIDsAreRejectedBeforeAnyRequest(t *testing.T) {
+	for name, run := range map[string]func(*Client, string) error{
+		"transcript": func(c *Client, id string) error { _, err := c.Transcripts.Get(context.Background(), id); return err },
+		"job":        func(c *Client, id string) error { _, err := c.Jobs.Get(context.Background(), id); return err },
+		"wait":       func(c *Client, id string) error { _, err := c.Jobs.Wait(context.Background(), id, nil); return err },
+	} {
+		for _, id := range []string{"", ".", ".."} {
+			t.Run(fmt.Sprintf("%s/%q", name, id), func(t *testing.T) {
+				srv := newScriptedServer(t, okBody)
+				c := newTestClient(t, srv.URL, newFakeClock())
+				assertCoreError(t, run(c, id), KindPreflight, "invalid_option", 0)
+				if srv.count() != 0 {
+					t.Errorf("invalid id sent %d requests", srv.count())
+				}
+			})
+		}
+	}
+}
+
+func TestCanceledCoreEntrypointsSendNoRequest(t *testing.T) {
+	for name, run := range map[string]func(context.Context, *Client) error{
+		"account":         func(ctx context.Context, c *Client) error { _, err := c.Account(ctx); return err },
+		"balance":         func(ctx context.Context, c *Client) error { _, err := c.Balance(ctx); return err },
+		"transcript list": func(ctx context.Context, c *Client) error { _, err := drain(c.Transcripts.List(ctx, nil)); return err },
+		"transcript page": func(ctx context.Context, c *Client) error { _, err := c.Transcripts.Page(ctx, nil); return err },
+		"deleted":         func(ctx context.Context, c *Client) error { _, err := drain(c.Transcripts.Deleted(ctx)); return err },
+		"jobs list":       func(ctx context.Context, c *Client) error { _, err := drain(c.Jobs.List(ctx, nil)); return err },
+		"job get":         func(ctx context.Context, c *Client) error { _, err := c.Jobs.Get(ctx, "job_1"); return err },
+		"job wait":        func(ctx context.Context, c *Client) error { _, err := c.Jobs.Wait(ctx, "job_1", nil); return err },
+		"transcript get":  func(ctx context.Context, c *Client) error { _, err := c.Transcripts.Get(ctx, "tr_1"); return err },
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newScriptedServer(t, okBody)
+			c := newTestClient(t, srv.URL, newFakeClock())
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			err := run(ctx, c)
+			e := wantCoreError(t, err, KindAbort, "aborted", 0)
+			if !errors.Is(err, context.Canceled) || e.IdempotencyKey != "" || srv.count() != 0 {
+				t.Errorf("cancel: %v, key %q, requests %d", err, e.IdempotencyKey, srv.count())
+			}
+		})
+	}
 }

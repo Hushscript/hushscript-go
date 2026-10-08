@@ -703,3 +703,131 @@ func TestACreateAnswerWithUnusablePartURLRowsIsBadResponse(t *testing.T) {
 		})
 	}
 }
+
+func TestJobsWaitTimeoutRejectsNegativeAndAcceptsZeroDefault(t *testing.T) {
+	for _, timeout := range []time.Duration{-time.Second, 0} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			srv := newScriptedServer(t, step{status: 200, headers: map[string]string{"Content-Type": "application/json"}, body: jobJSON("job_1", "done", "")})
+			c := newTestClient(t, srv.URL, newFakeClock())
+			job, err := c.Jobs.Wait(context.Background(), "job_1", &WaitOptions{WaitTimeout: timeout})
+			if timeout < 0 {
+				e := wantCode(t, err, KindPreflight, "invalid_option")
+				if e.Status != 0 || job != nil || srv.count() != 0 {
+					t.Errorf("invalid timeout: status = %d, job = %+v, requests = %d; want 0, nil, 0", e.Status, job, srv.count())
+				}
+				return
+			}
+			if err != nil || job == nil || job.ID != "job_1" || job.State != "done" {
+				t.Fatalf("default timeout: job = %+v, error = %v", job, err)
+			}
+			if srv.count() != 1 {
+				t.Fatalf("default timeout sent %d requests, want 1", srv.count())
+			}
+			if request := srv.request(0); request.method != "GET" || request.path != "/v1/jobs/job_1" {
+				t.Errorf("request = %s %s, want GET /v1/jobs/job_1", request.method, request.path)
+			}
+		})
+	}
+}
+
+func TestResumeInvalidOptionsSendNoRequests(t *testing.T) {
+	for name, opts := range map[string]*ResumeOptions{
+		"concurrency -1":        {Concurrency: -1},
+		"concurrency 9":         {Concurrency: 9},
+		"negative wait timeout": {WaitTimeout: -time.Second},
+		"reader size zero":      {Reader: bytes.NewReader(testWAV(20)), Size: 0},
+		"reader size negative":  {Reader: bytes.NewReader(testWAV(20)), Size: -1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			token := encodeResumeToken(resumeState{JobID: "job_1", IdempotencyKey: strings.Repeat("k", 16), Size: int64(len(r.wav)), DurationSeconds: 20})
+			_, err := r.client.Resume(context.Background(), token, opts)
+			e := wantCode(t, err, KindPreflight, "invalid_option")
+			if e.Status != 0 || r.api.total() != 0 {
+				t.Errorf("status = %d, requests = %d; want 0, 0", e.Status, r.api.total())
+			}
+		})
+	}
+}
+
+func TestHeartbeatFailuresAreIgnoredAndTheCadenceContinues(t *testing.T) {
+	for name, status := range map[string]int{"500 after retries": 500, "403": 403, "404": 404, "network": 0} {
+		t.Run(name, func(t *testing.T) {
+			clock := newVirtualClock()
+			api := newFakeAPI(t, clock)
+			api.partSize = testPartSize
+			api.heldR2 = make(chan struct{})
+			client := pipelineClient(t, api, clock)
+			api.setHook(func(s *seen) (int, string, bool) {
+				if s.route == "heartbeat" {
+					return status, `{"error":"heartbeat_failure","code":9999}`, true
+				}
+				return 0, "", false
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			waitForAlive := func(condition func() bool) {
+				waitFor(t, func() bool {
+					select {
+					case err := <-done:
+						t.Fatalf("heartbeat failure ended the upload while parts were held: %v", err)
+					default:
+					}
+					return condition()
+				})
+			}
+			wav := testWAV(20)
+			go func() {
+				_, err := client.TranscribeReader(ctx, bytes.NewReader(wav), int64(len(wav)), nil)
+				done <- err
+			}()
+			waitForAlive(func() bool { return api.count("r2") >= 1 && clock.sleepers() == 1 })
+			start := clock.Now()
+			clock.advanceTo(start.Add(120 * time.Second))
+			attempts := 1
+			if status == 500 || status == 0 {
+				attempts = 4
+			}
+			for k := 1; k <= attempts; k++ {
+				waitForAlive(func() bool { return api.count("heartbeat") == k && clock.sleepers() == 1 })
+				if k < attempts {
+					at, ok := clock.earliest()
+					if !ok {
+						t.Fatal("no retry timer")
+					}
+					clock.advanceTo(at)
+				}
+			}
+			at, ok := clock.earliest()
+			if !ok || at.After(start.Add(240*time.Second)) {
+				t.Fatalf("next heartbeat at %v, want no later than %v", at, start.Add(240*time.Second))
+			}
+			clock.advanceTo(at)
+			waitForAlive(func() bool { return api.count("heartbeat") == attempts+1 && clock.sleepers() == 1 })
+			beats := api.requests("heartbeat")
+			if !beats[0].at.Equal(start.Add(120*time.Second)) || beats[attempts].at.After(start.Add(240*time.Second)) {
+				t.Errorf("heartbeat times = %v, %v", beats[0].at, beats[attempts].at)
+			}
+			close(api.heldR2)
+			clock.run(t, api)
+			if err := <-done; err != nil {
+				t.Fatalf("heartbeat failure aborted upload: %v", err)
+			}
+			if api.count("complete") != 1 {
+				t.Errorf("complete = %d, want 1", api.count("complete"))
+			}
+		})
+	}
+}
+
+func TestResumeDefaultConcurrencyFinishes(t *testing.T) {
+	r := newRig(t)
+	token := stalledUpload(t, r)
+	got, err := r.client.Resume(context.Background(), token, &ResumeOptions{
+		Reader: bytes.NewReader(r.wav), Size: int64(len(r.wav)), Concurrency: 0,
+	})
+	if err != nil || got == nil || got.ID != "tr_1" {
+		t.Fatalf("Resume = %v, %v", got, err)
+	}
+}

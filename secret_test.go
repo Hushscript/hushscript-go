@@ -422,7 +422,7 @@ func TestEveryExportedStructWithHiddenStateIsInTheLeakSuite(t *testing.T) {
 func hasHiddenState(structure *ast.StructType) bool {
 	for _, field := range structure.Fields.List {
 		if len(field.Names) == 0 {
-			continue
+			return true
 		}
 		for _, name := range field.Names {
 			if !ast.IsExported(name.Name) {
@@ -439,4 +439,35 @@ func typeName(v any) string {
 		kind = kind.Elem()
 	}
 	return kind.Name()
+}
+
+func TestHiddenStateGuardIncludesEmbeddedFields(t *testing.T) {
+	for name, source := range map[string]string{
+		"named hidden":       "package p; type Example struct { token string }",
+		"embedded value":     "package p; type Example struct { hidden }",
+		"embedded pointer":   "package p; type Example struct { *hidden }",
+		"exported embedding": "package p; type Example struct { Holder }",
+		"public only":        "package p; type Example struct { Name string }",
+	} {
+		t.Run(name, func(t *testing.T) {
+			file, err := parser.ParseFile(token.NewFileSet(), "control.go", source, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var structure *ast.StructType
+			ast.Inspect(file, func(node ast.Node) bool {
+				if found, ok := node.(*ast.StructType); ok {
+					structure = found
+					return false
+				}
+				return true
+			})
+			if structure == nil {
+				t.Fatal("control has no struct")
+			}
+			if got, want := hasHiddenState(structure), name != "public only"; got != want {
+				t.Errorf("hidden state = %v, want %v", got, want)
+			}
+		})
+	}
 }

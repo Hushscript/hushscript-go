@@ -147,7 +147,11 @@ func TestLogsZeroDelayWhenNothingIsRetried(t *testing.T) {
 	_, _ = do(t, c, http.MethodPost, "/v1/billing/purchase", `{}`)
 	_, _ = do(t, c, http.MethodPost, "/v1/uploads/j1/complete", `{}`)
 	_, _ = do(t, c, http.MethodGet, "/v1/account", "")
-	for _, line := range logLines(&buf) {
+	lines := logLines(&buf)
+	if len(lines) != 6 {
+		t.Fatalf("got %d log lines for six attempts: %v", len(lines), lines)
+	}
+	for _, line := range lines {
 		if !strings.Contains(line, "retry_delay_ms=500") && !strings.Contains(line, "retry_delay_ms=0") {
 			t.Errorf("unexpected delay: %s", line)
 		}

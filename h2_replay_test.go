@@ -251,10 +251,23 @@ func TestANonReplayableRequestIsSentOnceWhenTheServerResetsItsStreamOverHTTP2(t 
 			},
 		},
 	}
+	controls := 0
+	t.Cleanup(func() {
+		if controls == 0 {
+			t.Error("no HTTP/2 replay control ran; non-replay assertions are unsupported")
+		}
+	})
 	for _, reset := range h2Resets {
 		for _, scheme := range h2Schemes {
+			retries := h2TransportRetries(t, scheme.cleartext, reset.code)
+			if retries {
+				controls++
+			}
 			for _, tc := range cases {
 				t.Run(reset.name+"/"+scheme.name+"/"+tc.name, func(t *testing.T) {
+					if !retries {
+						t.Skipf("this Go version's HTTP/2 transport does not retry %s, so the non-replay assertion is unsupported", reset.name)
+					}
 					srv := newH2ResetServer(t, scheme.cleartext, resetFirst(reset.code))
 					// The purchase class retries a lost answer once on its own, with its key; switch that off so
 					// only the transport could send it twice.
@@ -314,6 +327,12 @@ func h2TransportRetries(t *testing.T, cleartext bool, code uint32) bool {
 // The controls that make the test above mean something: the HTTP/2 transport does resend a request that
 // is safe to repeat, so the server sees it twice and the caller never notices.
 func TestARepeatableRequestIsResentByTheTransportAfterAStreamResetOverHTTP2(t *testing.T) {
+	controls := 0
+	t.Cleanup(func() {
+		if controls == 0 {
+			t.Error("no HTTP/2 replay control ran; non-replay assertions are unsupported")
+		}
+	})
 	cases := map[string]func(t *testing.T, c *Client) error{
 		"get": func(t *testing.T, c *Client) error {
 			_, err := do(t, c, http.MethodGet, "/v1/account", "")
@@ -335,6 +354,7 @@ func TestARepeatableRequestIsResentByTheTransportAfterAStreamResetOverHTTP2(t *t
 					if !h2TransportRetries(t, scheme.cleartext, reset.code) {
 						t.Skipf("this Go version's HTTP/2 transport does not retry %s, so the replay cannot be shown", reset.name)
 					}
+					controls++
 					srv := newH2ResetServer(t, scheme.cleartext, resetFirst(reset.code))
 					c := newTestClient(t, srv.URL(), newFakeClock(), WithHTTPClient(srv.client), WithMaxRetries(0))
 					if err := run(t, c); err != nil {

@@ -74,12 +74,13 @@ func run(pack string, yes bool, key string) error {
 // A 401 and a 429 are answered before that replay, so after the SDK's one retry they can follow a
 // first attempt that did charge. Any other outcome after the request was sent, a 401, a 408, a 409, a
 // 429, a 5xx, no status at all or an unusable answer, may have reached the card.
-var refusals = map[int]bool{400: true, 402: true, 403: true, 404: true, 422: true}
+var refusals = map[int]bool{400: true, 402: true, 404: true, 422: true}
 
 // mayHaveCharged reports whether a failed purchase may have reached the card: it was sent, and the
 // answer was not one of the listed refusals.
 func mayHaveCharged(failure *hushscript.Error) bool {
-	return failure.IdempotencyKey != "" && !refusals[failure.Status]
+	refused := refusals[failure.Status] || failure.Status == 403 && (failure.NumericCode == 4021 || failure.NumericCode == 4023)
+	return failure.IdempotencyKey != "" && !refused
 }
 
 func report(err error) {

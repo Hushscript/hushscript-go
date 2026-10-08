@@ -5,12 +5,15 @@ set -euo pipefail
 
 fuzz_time="${FUZZ_TIME:-60s}"
 found=0
+packages="$(go list ./...)"
 while read -r pkg; do
   [ -n "$pkg" ] || continue
-  for target in $(go test -list '^Fuzz' "$pkg" | grep '^Fuzz' || true); do
+  listed="$(go test -list '^Fuzz' "$pkg")"
+  while read -r target; do
+    [[ "$target" =~ ^Fuzz[A-Za-z0-9_]+$ ]] || continue
     found=1
     echo "fuzzing $pkg $target for $fuzz_time"
     go test -run '^$' -fuzz "^${target}\$" -fuzztime "$fuzz_time" "$pkg"
-  done
-done < <(go list ./...)
-[ "$found" = 1 ] || echo "no fuzz targets yet"
+  done <<< "$listed"
+done <<< "$packages"
+[ "$found" = 1 ] || { echo "fuzz: no targets found" >&2; exit 1; }

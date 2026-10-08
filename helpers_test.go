@@ -224,3 +224,17 @@ func (cancellingClock) Sleep(_ context.Context, _ time.Duration) error { return 
 func isContextError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
+
+func wantCoreError(t *testing.T, err error, kind ErrorKind, code string, status int) *Error {
+	t.Helper()
+	e := wantCode(t, err, kind, code)
+	if e.Status != status {
+		t.Fatalf("status %d, want %d: %v", e.Status, status, err)
+	}
+	return e
+}
+
+func assertCoreError(t *testing.T, err error, kind ErrorKind, code string, status int) {
+	t.Helper()
+	_ = wantCoreError(t, err, kind, code, status)
+}

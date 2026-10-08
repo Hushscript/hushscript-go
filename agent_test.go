@@ -113,10 +113,10 @@ func TestSignupIsNeverRetriedAndALostAnswerIsOutcomeUnknownWithoutAHint(t *testi
 		if len(srv.to(signupRoute)) != 1 {
 			t.Errorf("%s: %d requests", name, len(srv.to(signupRoute)))
 		}
-		if name == "drop" && (e.Kind != KindOutcomeUnknown || e.Hint != "" || e.Unwrap() == nil) {
+		if name == "drop" && (e.Kind != KindOutcomeUnknown || e.Code != "outcome_unknown" || e.Status != 0 || e.Hint != "" || e.Unwrap() == nil) {
 			t.Errorf("drop: %+v", e)
 		}
-		if name == "503" && e.Kind != KindAPI {
+		if name == "503" && (e.Kind != KindAPI || e.Code != "http_503" || e.Status != 503) {
 			t.Errorf("503: %+v", e)
 		}
 	}
@@ -685,6 +685,58 @@ func TestAResultThatHoldsASecretPrintsRedactedInPlaceOfItAndEncodesIt(t *testing
 				if encoded, err := json.Marshal(v); err != nil || !strings.Contains(string(encoded), secretText) {
 					t.Errorf("json.Marshal of the %s = %s, %v: the value must ride along", form, encoded, err)
 				}
+			}
+		})
+	}
+}
+
+func TestCanceledAgentCallsSendNothingAndKeepTheOldToken(t *testing.T) {
+	calls := map[string]func(context.Context, *Client, *routeServer) error{
+		"signup": func(ctx context.Context, _ *Client, srv *routeServer) error {
+			_, err := AgentSignup(ctx, request(), tokenless(srv)...)
+			return err
+		},
+		"claim": func(ctx context.Context, _ *Client, srv *routeServer) error {
+			_, err := AgentClaim(ctx, "sg_1", "cs_secret", tokenless(srv)...)
+			return err
+		},
+		"rotate": func(ctx context.Context, c *Client, _ *routeServer) error {
+			_, err := c.Agent.RotateToken(ctx)
+			return err
+		},
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			srv := newRouteServer(t, func(rec recorded, _ int) step {
+				switch rec.method + " " + rec.path {
+				case signupRoute:
+					return signupAnswer()
+				case claimRoute:
+					return claimAnswer()
+				case rotateRoute:
+					return rotateAnswer("null")
+				}
+				return step{status: 404, body: jsonError("not_found", 4040)}
+			})
+			c := srv.client(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			e := wantCode(t, call(ctx, c, srv), KindAbort, "aborted")
+			if e.Status != 0 || len(srv.all()) != 0 || c.core.cfg.tokens.get() != testToken || !errors.Is(e, context.Canceled) {
+				t.Errorf("status %d, requests %v, token changed %v, cause %v", e.Status, srv.all(), c.core.cfg.tokens.get() != testToken, e.Unwrap())
+			}
+		})
+	}
+}
+
+func TestAgentClaimIDsAreRejectedBeforeAnyRequest(t *testing.T) {
+	for _, id := range []string{"", ".", ".."} {
+		t.Run(fmt.Sprintf("%q", id), func(t *testing.T) {
+			srv := newScriptedServer(t, okBody)
+			_, err := AgentClaim(context.Background(), id, "claim-secret", WithBaseURL(srv.URL), WithClock(newFakeClock()))
+			assertCoreError(t, err, KindPreflight, "invalid_option", 0)
+			if srv.count() != 0 {
+				t.Errorf("invalid signup id sent %d requests", srv.count())
 			}
 		})
 	}

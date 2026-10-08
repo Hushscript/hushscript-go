@@ -53,7 +53,7 @@ func TestReadsTheTokenFromTheEnvironmentAndLetsTheOptionWin(t *testing.T) {
 func TestRefusesATokenThatDoesNotStartWithHsr(t *testing.T) {
 	_, err := New(WithToken("sk-not-ours"))
 	apiErr := asError(t, err)
-	if apiErr.Kind != KindConfiguration || !strings.Contains(apiErr.Message, "This doesn't look like a Hushscript token") {
+	if apiErr.Kind != KindConfiguration || apiErr.Code != "config_invalid" || apiErr.Status != 0 || !strings.Contains(apiErr.Message, "This doesn't look like a Hushscript token") {
 		t.Errorf("error = %v", apiErr)
 	}
 	if strings.Contains(apiErr.Error(), "sk-not-ours") {
@@ -117,7 +117,7 @@ func TestAcceptsOnlyHTTPSOrLoopbackHTTPBaseURLs(t *testing.T) {
 			t.Errorf("%q was accepted", base)
 			continue
 		}
-		if asError(t, err).Kind != KindConfiguration {
+		if e := asError(t, err); e.Kind != KindConfiguration || e.Code != "config_invalid" || e.Status != 0 {
 			t.Errorf("%q: wrong kind", base)
 		}
 	}
@@ -133,8 +133,11 @@ func TestReadsTheBaseURLFromTheEnvironment(t *testing.T) {
 		t.Errorf("baseURL = %q", c.core.cfg.baseURL)
 	}
 	t.Setenv("HUSHSCRIPT_BASE_URL", "http://evil.test")
-	if _, err := New(WithToken(testToken)); err == nil {
-		t.Error("a bad base URL in the environment was accepted")
+	_, err = New(WithToken(testToken))
+	assertCoreError(t, err, KindConfiguration, "config_invalid", 0)
+	c, err = New(WithToken(testToken), WithBaseURL("http://127.0.0.1:4010"))
+	if err != nil || c.core.cfg.baseURL != "http://127.0.0.1:4010" {
+		t.Fatalf("explicit base URL must beat invalid environment: %v", err)
 	}
 }
 
@@ -146,9 +149,10 @@ func TestRejectsNonsenseOptionValues(t *testing.T) {
 		"nil clock":        WithClock(nil),
 		"nil http client":  WithHTTPClient(nil),
 	} {
-		if _, err := New(WithToken(testToken), opt); err == nil {
-			t.Errorf("%s was accepted", name)
-		}
+		t.Run(name, func(t *testing.T) {
+			_, err := New(WithToken(testToken), opt)
+			assertCoreError(t, err, KindConfiguration, "config_invalid", 0)
+		})
 	}
 	c, err := New(WithToken(testToken), WithTimeout(5*time.Second), WithMaxRetries(0))
 	if err != nil {
@@ -174,9 +178,8 @@ func TestLoggingIsOffUnlessAskedFor(t *testing.T) {
 		t.Errorf("HUSHSCRIPT_LOG=off: logger %v, err %v", c.core.cfg.logger, err)
 	}
 	t.Setenv("HUSHSCRIPT_LOG", "verbose")
-	if _, verboseErr := New(WithToken(testToken)); verboseErr == nil {
-		t.Error("an unknown log level was accepted")
-	}
+	_, verboseErr := New(WithToken(testToken))
+	assertCoreError(t, verboseErr, KindConfiguration, "config_invalid", 0)
 	t.Setenv("HUSHSCRIPT_LOG", "debug")
 	c, err = New(WithToken(testToken), WithLogLevel("off"))
 	if err != nil || c.core.cfg.logger != nil {
@@ -187,9 +190,8 @@ func TestLoggingIsOffUnlessAskedFor(t *testing.T) {
 	if err != nil || c.core.cfg.logger == nil {
 		t.Errorf("WithLogLevel(debug) should beat HUSHSCRIPT_LOG=off: err %v", err)
 	}
-	if _, levelErr := New(WithToken(testToken), WithLogLevel("info")); levelErr == nil {
-		t.Error("an unknown level was accepted")
-	}
+	_, levelErr := New(WithToken(testToken), WithLogLevel("info"))
+	assertCoreError(t, levelErr, KindConfiguration, "config_invalid", 0)
 	own := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 	t.Setenv("HUSHSCRIPT_LOG", "")
 	c, err = New(WithToken(testToken), WithLogger(own))
@@ -238,8 +240,8 @@ func TestNeverLogsTheToken(t *testing.T) {
 }
 
 func TestSendsAnIdentifyingUserAgent(t *testing.T) {
-	if !regexp.MustCompile(`^hushscript-go/\S+ go/\d+\.\d+(\.\d+)?$`).MatchString(userAgent()) {
-		t.Errorf("user agent = %q", userAgent())
+	if got := userAgent(); !regexp.MustCompile(`^hushscript-go/\S+ go/\d+\.\d+(\.\d+)?$`).MatchString(got) {
+		t.Errorf("user agent = %q, want SDK and numeric Go versions", got)
 	}
 }
 
@@ -266,11 +268,21 @@ func TestRejectsATokenWithCharactersOutsidePrintableASCIIWithoutEchoingIt(t *tes
 	for _, token := range []string{"hsr1 with space", "hsr1\nnewline", "hsr1\x00nul", "hsr1:eu:pat.…", "hsr\x7f", "hsr1\ttab"} {
 		_, err := New(WithToken(token))
 		apiErr := asError(t, err)
-		if apiErr.Kind != KindConfiguration {
+		if apiErr.Kind != KindConfiguration || apiErr.Code != "config_invalid" || apiErr.Status != 0 {
 			t.Errorf("%q: kind %v", token, apiErr.Kind)
 		}
 		if strings.Contains(apiErr.Error(), strings.TrimPrefix(token, "hsr")) && len(token) > 5 {
 			t.Errorf("%q was echoed in %q", token, apiErr.Error())
 		}
+	}
+}
+
+func TestEmptyAndWhitespaceTokensAreConfigurationErrors(t *testing.T) {
+	t.Setenv("HUSHSCRIPT_TOKEN", "")
+	for _, token := range []string{"", " ", "\t", "hsré"} {
+		t.Run(fmt.Sprintf("%q", token), func(t *testing.T) {
+			_, err := New(WithToken(token))
+			assertCoreError(t, err, KindConfiguration, "config_invalid", 0)
+		})
 	}
 }

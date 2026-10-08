@@ -106,6 +106,8 @@ func TestABuyAnsweredWithAHugeNumberFailsAsAnSDKErrorCarryingTheKey(t *testing.T
 		"2xx with 1e400":                   {status: 200, body: `{"status":"ok","balance_seconds":1e400}`},
 		"2xx with NaN":                     {status: 200, body: `{"status":"ok","balance_seconds":NaN}`},
 		"2xx with a fraction":              {status: 200, body: `{"status":"ok","balance_seconds":1.5}`},
+		"201 with a huge balance":          {status: 201, body: `{"status":"ok","balance_seconds":` + huge + `}`},
+		"203 with 1e400":                   {status: 203, body: `{"status":"ok","balance_seconds":1e400}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			api := buyServer(t, defaultCard, answer)
@@ -114,6 +116,12 @@ func TestABuyAnsweredWithAHugeNumberFailsAsAnSDKErrorCarryingTheKey(t *testing.T
 				t.Fatal("no error")
 			}
 			e := asError(t, err)
+			if answer.status >= 200 && answer.status < 300 {
+				e = wantCode(t, err, KindAPI, "bad_response")
+				if e.Status != answer.status {
+					t.Errorf("status = %d, want %d", e.Status, answer.status)
+				}
+			}
 			if e.IdempotencyKey != "numbers-key-1" {
 				t.Errorf("%s %q carries key %q", e.Kind, e.Code, e.IdempotencyKey)
 			}

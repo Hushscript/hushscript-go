@@ -1,8 +1,10 @@
 package hushscript
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -92,12 +94,19 @@ func TestATranscriptWithoutWhatTheFormattersNeedIsRefused(t *testing.T) {
 		"null":               `null`,
 		"no id":              `{"title":"T","body":{"original":{"utterances":[]}}}`,
 		"no body":            `{"id":"x"}`,
-		"null utterances":    `{"id":"x","body":{"original":{"utterances":null}}}`,
-		"mistyped timestamp": `{"id":"x","body":{"original":{"utterances":[{"speaker":"A","start_ms":"0","end_ms":1,"text":"a"}]}}}`,
-		"mistyped locale":    `{"id":"x","body":{"original":{"utterances":[]},"translations":{"fr":7}}}`,
-		"mistyped list":      `{"id":"x","body":{"original":{"utterances":[]},"translations":[]}}`,
+		"null utterances":    `{"id":"x","created_at":1,"body":{"original":{"utterances":null}}}`,
+		"mistyped timestamp": `{"id":"x","created_at":1,"body":{"original":{"utterances":[{"speaker":"A","start_ms":"0","end_ms":1,"text":"a"}]}}}`,
+		"mistyped locale":    `{"id":"x","created_at":1,"body":{"original":{"utterances":[]},"translations":{"fr":7}}}`,
+		"mistyped list":      `{"id":"x","created_at":1,"body":{"original":{"utterances":[]},"translations":[]}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
+			srv := newScriptedServer(t, step{status: 200, body: body})
+			c := newTestClient(t, srv.URL, newFakeClock())
+			_, err := c.Transcripts.Get(context.Background(), "x")
+			assertCoreError(t, err, KindAPI, "bad_response", 200)
+			if srv.count() != 1 {
+				t.Errorf("requests = %d, want 1", srv.count())
+			}
 			var tr Transcript
 			if err := json.Unmarshal([]byte(body), &tr); err == nil {
 				t.Errorf("accepted %s as %+v", body, tr)
@@ -263,5 +272,74 @@ func TestFormattersUseTheRequestedLanguageAndFallBackToTheOriginal(t *testing.T)
 	}
 	if got := tr.VTT(&FormatOptions{Language: "es", Captions: flag(false)}); !strings.Contains(got, "Ann: hola") {
 		t.Errorf("vtt es = %q", got)
+	}
+}
+
+func TestTranscriptTimestampNumbersRespectIntegerBoundsAndFloorFractions(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	minInt := -maxInt - 1
+	for _, field := range []string{"start_ms", "end_ms"} {
+		for _, locale := range []string{"original", "fr", "cleaned"} {
+			for _, tc := range []struct {
+				name, value string
+				want        int
+				wantError   bool
+			}{
+				{"int-max", strconv.Itoa(maxInt), maxInt, false},
+				{"int-min", strconv.Itoa(minInt), minInt, false},
+				{"above-int-max", strconv.FormatUint(uint64(maxInt)+1, 10), 0, true},
+				{"below-int-min", "-" + strconv.FormatUint(uint64(maxInt)+2, 10), 0, true},
+				{"positive-overflow", "1e300", 0, true},
+				{"negative-overflow", "-1e300", 0, true},
+				{"positive-fraction", "1.9", 1, false},
+				{"negative-fraction", "-0.1", -1, false},
+				{"exponent", "1.9e1", 19, false},
+				{"zero", "0", 0, false},
+				{"quoted-number", `"1"`, 0, true},
+				{"folded-key-quoted-number", `"1"`, 0, true},
+				{"duplicate-invalid-first", `"1","` + field + `":1`, 0, true},
+				{"nan", "NaN", 0, true},
+				{"infinity", "Infinity", 0, true},
+			} {
+				t.Run(field+"/"+locale+"/"+tc.name, func(t *testing.T) {
+					start, end := "0", "1000"
+					if field == "start_ms" {
+						start = tc.value
+					} else {
+						end = tc.value
+					}
+					utterance := `{"speaker":"A","start_ms":` + start + `,"end_ms":` + end + `,"text":"a"}`
+					if tc.name == "folded-key-quoted-number" {
+						utterance = strings.Replace(utterance, `"`+field+`"`, `"`+strings.ToUpper(field)+`"`, 1)
+					}
+					body := `{"id":"tr_1","created_at":1,"body":{"original":{"utterances":[` + utterance + `]}}}`
+					if locale != "original" {
+						body = `{"id":"tr_1","created_at":1,"body":{"original":{"utterances":[]},"translations":{"` + locale + `":{"utterances":[` + utterance + `]}}}}`
+					}
+					var got Transcript
+					err := json.Unmarshal([]byte(body), &got)
+					if tc.wantError {
+						if err == nil {
+							t.Fatal("invalid timestamp accepted")
+						}
+						return
+					}
+					if err != nil {
+						t.Fatalf("valid timestamp %s rejected: %v", tc.value, err)
+					}
+					items := got.UtterancesFor(locale)
+					if len(items) != 1 {
+						t.Fatalf("utterances = %d, want 1", len(items))
+					}
+					value := items[0].StartMs
+					if field == "end_ms" {
+						value = items[0].EndMs
+					}
+					if value != tc.want {
+						t.Errorf("timestamp = %d, want %d", value, tc.want)
+					}
+				})
+			}
+		}
 	}
 }

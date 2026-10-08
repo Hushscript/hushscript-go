@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -118,7 +119,8 @@ func (c *Client) LogValue() slog.Value {
 
 // userAgent is "hushscript-go/<version> go/<go version>" (spec section 3).
 func userAgent() string {
-	return fmt.Sprintf("hushscript-go/%s go/%s", sdkVersion(), strings.TrimPrefix(runtime.Version(), "go"))
+	version := regexp.MustCompile(`go\d+\.\d+(?:\.\d+)?`).FindString(runtime.Version())
+	return fmt.Sprintf("hushscript-go/%s go/%s", sdkVersion(), strings.TrimPrefix(version, "go"))
 }
 
 // sdkVersion is the module version the consumer's build resolved, which release-please tags set.

@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 
@@ -31,7 +32,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Println(transcript.Text(nil))
+	fmt.Println(transcript.Text(nil))
 	if err := os.WriteFile("meeting.srt", []byte(transcript.SRT(nil)), 0o600); err != nil {
 		log.Fatal(err)
 	}
@@ -161,8 +162,9 @@ with it and the purchase can never happen twice:
 purchase, err := client.Buy(ctx, "300min", &hushscript.BuyOptions{AcknowledgeNoRefund: true})
 var failure *hushscript.Error
 if errors.As(err, &failure) && failure.IdempotencyKey != "" {
-	switch failure.Status {
-	case 400, 402, 403, 404, 422:
+	switch {
+	case failure.Status == 400 || failure.Status == 402 || failure.Status == 404 || failure.Status == 422 ||
+		failure.Status == 403 && (failure.NumericCode == 4021 || failure.NumericCode == 4023):
 		// Only these refusals charged nothing (4021 and 4023 are 403). A 401 or a 429 does not
 		// prove it: the server answers them before it replays a completed purchase, so after the
 		// SDK's one retry they can follow a first attempt that charged.

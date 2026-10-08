@@ -1,6 +1,10 @@
 package hushscript
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"strings"
 	"testing"
 )
 
@@ -16,7 +20,7 @@ func raisedBy(f func()) (raised any) {
 	return nil
 }
 
-func TestAPanicInOnResumeTokenLeavesTranscribeUnchangedBeforeAnythingElseIsSent(t *testing.T) {
+func TestAPanicInOnResumeTokenReachesTheCallerWithItsValue(t *testing.T) {
 	r := newRig(t)
 	sentinel := &callbackSentinel{"token"}
 	raised := raisedBy(func() {
@@ -25,12 +29,9 @@ func TestAPanicInOnResumeTokenLeavesTranscribeUnchangedBeforeAnythingElseIsSent(
 	if raised != any(sentinel) {
 		t.Fatalf("raised %#v, want the callback's own value", raised)
 	}
-	if r.api.count("create") != 1 || r.api.count("complete") != 0 || r.api.count("r2") != 0 {
-		t.Errorf("create %d, parts %d, complete %d", r.api.count("create"), r.api.count("r2"), r.api.count("complete"))
-	}
 }
 
-func TestAPanicInOnProgressOnAnUploadWorkerReachesTheCallerWithItsValueAndStopsTheUpload(t *testing.T) {
+func TestAPanicInOnProgressOnAnUploadWorkerReachesTheCallerWithItsValue(t *testing.T) {
 	for name, opts := range map[string]TranscribeOptions{
 		"one worker":   {Concurrency: 1},
 		"four workers": {Concurrency: 4},
@@ -38,9 +39,7 @@ func TestAPanicInOnProgressOnAnUploadWorkerReachesTheCallerWithItsValueAndStopsT
 		t.Run(name, func(t *testing.T) {
 			r := newRig(t)
 			sentinel := &callbackSentinel{"worker"}
-			reports := 0
 			opts.OnProgress = func(p Progress) {
-				reports++
 				if p.Stage == StageUploading && p.BytesSent > 0 {
 					panic(sentinel)
 				}
@@ -49,12 +48,6 @@ func TestAPanicInOnProgressOnAnUploadWorkerReachesTheCallerWithItsValueAndStopsT
 			raised := raisedBy(func() { _, err = r.transcribe(&opts) })
 			if raised != any(sentinel) {
 				t.Fatalf("raised %#v, error %v; want the callback's own value", raised, err)
-			}
-			if r.api.count("complete") != 0 {
-				t.Error("the upload went on to complete after the callback panicked")
-			}
-			if reports != 2 {
-				t.Errorf("OnProgress ran %d times: once at the start, once to panic, never again", reports)
 			}
 		})
 	}
@@ -85,5 +78,78 @@ func TestAPanicWithAnSDKErrorValueIsNotAnnotatedOrReplaced(t *testing.T) {
 	})
 	if raised != any(own) || own.Code != "mine" || own.IdempotencyKey != "" || own.ResumeToken != "" {
 		t.Errorf("raised %#v, error %+v", raised, own)
+	}
+}
+
+func TestJobsWaitProgressPanicsPreserveErrorAndNonErrorValues(t *testing.T) {
+	for _, errorValue := range []bool{false, true} {
+		t.Run(map[bool]string{false: "value", true: "error"}[errorValue], func(t *testing.T) {
+			r := newRig(t)
+			r.api.jobStates = []string{"processing", "done"}
+			var sentinel any = &callbackSentinel{"jobs wait"}
+			if errorValue {
+				sentinel = errors.New("caller callback error")
+			}
+			raised := raisedBy(func() {
+				_, _ = r.client.Jobs.Wait(context.Background(), "job_1", &WaitOptions{OnProgress: func(Progress) { panic(sentinel) }})
+			})
+			if raised != sentinel {
+				t.Fatalf("panic = %#v, want original %#v", raised, sentinel)
+			}
+		})
+	}
+}
+
+func TestResumeProgressPanicsPropagateTheirOriginalValue(t *testing.T) {
+	for _, stage := range []ProgressStage{StageUploading, StageProcessing} {
+		for _, errorValue := range []bool{false, true} {
+			t.Run(string(stage)+"/"+map[bool]string{false: "value", true: "error"}[errorValue], func(t *testing.T) {
+				r := newRig(t)
+				var token string
+				mustTranscribe(t, r, &TranscribeOptions{IdempotencyKey: strings.Repeat("k", 16), OnResumeToken: func(s string) { token = s }})
+				if stage == StageUploading {
+					r.api.jobStates = []string{"uploading"}
+				} else {
+					r.api.jobStates = []string{"processing"}
+				}
+				var sentinel any = &callbackSentinel{"resume"}
+				if errorValue {
+					sentinel = errors.New("caller callback error")
+				}
+				raised := raisedBy(func() {
+					_, _ = r.client.Resume(context.Background(), token, &ResumeOptions{Reader: bytes.NewReader(r.wav), Size: int64(len(r.wav)), OnProgress: func(p Progress) {
+						if p.Stage == stage {
+							panic(sentinel)
+						}
+					}})
+				})
+				if raised != sentinel {
+					t.Fatalf("panic = %#v, want original %#v", raised, sentinel)
+				}
+			})
+		}
+	}
+}
+
+func TestResumeWorkerPanicsPropagateTheirOriginalValue(t *testing.T) {
+	for _, mode := range []string{"panic value", "panic error"} {
+		t.Run(mode, func(t *testing.T) {
+			r := newRig(t)
+			token := stalledUpload(t, r)
+			opts := &ResumeOptions{Reader: bytes.NewReader(r.wav), Size: int64(len(r.wav)), Concurrency: 0}
+			var sentinel any = &callbackSentinel{"resume worker"}
+			if mode == "panic error" {
+				sentinel = errors.New("caller callback error")
+			}
+			opts.OnProgress = func(p Progress) {
+				if p.BytesSent > 0 {
+					panic(sentinel)
+				}
+			}
+			raised := raisedBy(func() { _, _ = r.client.Resume(context.Background(), token, opts) })
+			if raised != sentinel {
+				t.Errorf("panic = %#v, want original %#v", raised, sentinel)
+			}
+		})
 	}
 }

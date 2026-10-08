@@ -20,7 +20,7 @@ func failedSeq[T any](err error) iter.Seq2[T, error] {
 }
 
 func (c *core) paginationLoop() *Error {
-	return newSDKError(KindAPI, "pagination_loop",
+	return newSDKError(KindUnexpected, "pagination_loop",
 		"The API returned the same page cursor it was sent; stopping instead of repeating the page.", nil, c.cfg.redactor(), hintInputs{})
 }
 

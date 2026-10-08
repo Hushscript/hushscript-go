@@ -55,3 +55,18 @@ func TestRedactsInsideNestedValues(t *testing.T) {
 		t.Error("the input was modified")
 	}
 }
+
+func TestBareSecretRedactionStartsAtSixteenCharacters(t *testing.T) {
+	for _, length := range []int{15, 16} {
+		tail := strings.Repeat("a", length)
+		r := newRedactor("hsr1:eu:pat.bb." + tail)
+		got := r.apply("echo " + tail + " end")
+		want := "echo " + tail + " end"
+		if length == 16 {
+			want = "echo " + redactedToken + " end"
+		}
+		if got != want {
+			t.Errorf("%d-character tail: %q, want %q", length, got, want)
+		}
+	}
+}
