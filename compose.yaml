@@ -67,7 +67,7 @@ services:
         timeout 1800 go test -p 4 -race -shuffle=on -count=1 -coverprofile=/tmp/cover.out -coverpkg=./... ./...
         && scripts/coverage.sh /tmp/cover.out 85
 
-  # go-mutesting on the HTTP core (nightly). It rewrites sources in place, so it works on a copy.
+  # go-mutesting on selected source files (nightly). It rewrites sources in place, so it works on a copy.
   mutation:
     <<: *sandboxed
     volumes:
@@ -75,7 +75,7 @@ services:
     environment:
       GOPROXY: "off"
       CONFORMANCE_DIR: /conformance
-    command: ["timeout", "1800", "scripts/mutation.sh", "75"]
+    command: ["timeout", "${MUTATION_TIMEOUT:-21600}", "scripts/mutation.sh", "75"]
 
   # Native fuzz targets, one at a time (nightly).
   fuzz:

@@ -31,8 +31,9 @@ test version=floor:
     docker compose build mock test
     docker compose run --rm test
 
-# go-mutesting on the HTTP core (nightly)
-mutation version=floor:
+# go-mutesting on selected source files (all eight by default; nightly uses one per job)
+[positional-arguments]
+mutation version=floor *files:
     #!/usr/bin/env bash
     set -euo pipefail
     {{ if version == "1.25" { "" } else if version == "1.27" { "" } else { error("version must be 1.25 or 1.27") } }}
@@ -41,7 +42,8 @@ mutation version=floor:
     export CONFORMANCE_DIR
     trap 'docker compose down --remove-orphans >/dev/null 2>&1 || true' EXIT
     docker compose build mock mutation
-    docker compose run --rm mutation
+    shift
+    docker compose run --rm mutation timeout "${MUTATION_TIMEOUT:-21600}" scripts/mutation.sh 75 "$@"
 
 # native fuzz targets, FUZZ_TIME each (default 60s; nightly)
 fuzz version=floor:

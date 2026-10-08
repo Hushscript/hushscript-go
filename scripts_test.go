@@ -82,7 +82,7 @@ func gateScript(t *testing.T, name string) (script, path string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return `bash "$1" "${2:-}"` + "\n", path
+	return `script="$1"; shift; bash "$script" "$@"` + "\n", path
 }
 
 func TestFuzzGateRejectsBuildErrorsAndZeroTargets(t *testing.T) {
@@ -124,6 +124,57 @@ func TestMutationGateIncludesTheTranscribePipelineAndKeepsTheFloor(t *testing.T)
 	}
 	if out, err = runGate(t, script, "mutation", path, "81"); err == nil {
 		t.Fatalf("score below floor passed: %s", out)
+	}
+}
+
+func TestMutationGateSelectsSourceFilesAndKeepsTheFloor(t *testing.T) {
+	script, path := gateScript(t, "mutation.sh")
+	for _, tc := range []struct {
+		name, floor string
+		files       []string
+		wantError   bool
+	}{
+		{"one-file", "75", []string{"http.go"}, false},
+		{"multiple-files", "75", []string{"upload.go", "retry.go"}, false},
+		{"floor-boundary", "80", []string{"http.go"}, false},
+		{"below-floor", "81", []string{"http.go"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{path, tc.floor}, tc.files...)
+			out, err := runGate(t, script, "mutation", args...)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("error = %v, wantError = %v, output = %s", err, tc.wantError, out)
+			}
+			want := "mutation-files tool -modfile=tools/go.mod go-mutesting --debug --exec-timeout=60 " + strings.Join(tc.files, " ") + "\n"
+			if strings.Count(out, want) != 1 {
+				t.Fatalf("want one invocation %q, got %s", want, out)
+			}
+		})
+	}
+	for _, files := range [][]string{{"http.go"}, {"upload.go", "retry.go"}} {
+		t.Run("zero-scored-"+strings.Join(files, "-"), func(t *testing.T) {
+			t.Setenv("MUTATION_OUTPUT", "")
+			args := append([]string{path, "75"}, files...)
+			out, err := runGate(t, script, "mutation-fixture", args...)
+			if err == nil || !strings.Contains(out, "mutation: no scored mutants") {
+				t.Fatalf("zero scored mutants: error = %v, output = %s", err, out)
+			}
+		})
+	}
+}
+
+func TestMutationGateRejectsUnknownSourceFiles(t *testing.T) {
+	script, path := gateScript(t, "mutation.sh")
+	for _, files := range [][]string{{"nope.go"}, {"http.go", "nope.go"}, {""}, {"http.go retry.go"}, {"HTTP.go"}, {"./http.go"}} {
+		t.Run(strings.Join(files, "|"), func(t *testing.T) {
+			out, err := runGate(t, script, "mutation", append([]string{path, "75"}, files...)...)
+			if err == nil {
+				t.Fatalf("accepted %q: %s", files, out)
+			}
+			if !strings.Contains(out, "mutation: unknown source file '") || strings.Contains(out, "mutation-files") {
+				t.Fatalf("output = %s", out)
+			}
+		})
 	}
 }
 

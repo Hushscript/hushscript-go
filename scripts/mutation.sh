@@ -1,9 +1,26 @@
 #!/usr/bin/env bash
 # go-mutesting on the HTTP core and transcribe pipeline; fails below the given score (percent). It rewrites sources in place,
-# so it runs on a copy of the tree.
+# so it runs on a copy of the tree. Usage: mutation.sh FLOOR [FILE...]. Without files it mutates all of them (a long
+# local run); the nightly workflow runs one job per file so each finishes inside its budget.
 set -euo pipefail
 
 floor="${1:?minimum score in percent}"
+shift
+known=(http.go retry.go pacing.go transcribe.go upload.go resume.go wait.go heartbeat.go)
+files=("$@")
+if [ "${#files[@]}" -eq 0 ]; then
+  files=("${known[@]}")
+fi
+for file in "${files[@]}"; do
+  found=0
+  for name in "${known[@]}"; do
+    if [ "$file" = "$name" ]; then found=1; fi
+  done
+  if [ "$found" -eq 0 ]; then
+    echo "mutation: unknown source file '${file}' (known: ${known[*]})" >&2
+    exit 2
+  fi
+done
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 cp -a . "$work/src"
@@ -11,7 +28,7 @@ cd "$work/src"
 out="$work/mutation.txt"
 # The pinned runner reports compile failures as PASS on current Go. Debug output
 # includes the test result for each mutant, so the aggregate score is not used.
-NO_COLOR=1 go tool -modfile=tools/go.mod go-mutesting --debug --exec-timeout=60 http.go retry.go pacing.go transcribe.go upload.go resume.go wait.go heartbeat.go 2>&1 | tee "$out"
+NO_COLOR=1 go tool -modfile=tools/go.mod go-mutesting --debug --exec-timeout=60 "${files[@]}" 2>&1 | tee "$out"
 awk -v floor="$floor" '
   /^Execute built-in exec command for mutation$/ {
     if (phase) invalid = 1

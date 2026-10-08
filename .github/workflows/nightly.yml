@@ -12,9 +12,21 @@ concurrency:
 
 jobs:
   mutation:
-    name: mutation (go-mutesting)
+    name: mutation (${{ matrix.file }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: ${{ matrix.job_minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {file: http.go, job_minutes: 60, mutation_seconds: 3300}
+          - {file: retry.go, job_minutes: 60, mutation_seconds: 3300}
+          - {file: pacing.go, job_minutes: 60, mutation_seconds: 3300}
+          - {file: transcribe.go, job_minutes: 110, mutation_seconds: 6000}
+          - {file: upload.go, job_minutes: 120, mutation_seconds: 6600}
+          - {file: resume.go, job_minutes: 60, mutation_seconds: 3300}
+          - {file: wait.go, job_minutes: 60, mutation_seconds: 3300}
+          - {file: heartbeat.go, job_minutes: 60, mutation_seconds: 3300}
     permissions:
       contents: read
     steps:
@@ -40,7 +52,10 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - name: Run mutation tests
-        run: just mutation
+        env:
+          MUTATION_FILE: ${{ matrix.file }}
+          MUTATION_TIMEOUT: ${{ matrix.mutation_seconds }}
+        run: just mutation 1.25 "$MUTATION_FILE"
 
   fuzz:
     name: fuzz targets
