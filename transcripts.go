@@ -98,6 +98,9 @@ func (t TranscriptsService) Page(ctx context.Context, opts *PageOptions) (*Page[
 	if err != nil {
 		return nil, (&annotator{core: t.core}).annotate(ctx, err)
 	}
+	if page.NextCursor != "" && page.NextCursor == opts.Cursor {
+		return nil, t.core.paginationLoop()
+	}
 	return &page, nil
 }
 

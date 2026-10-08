@@ -610,3 +610,43 @@ func TestCanceledCoreEntrypointsSendNoRequest(t *testing.T) {
 		})
 	}
 }
+
+func TestTranscriptPageRejectsRepeatedNonemptyCursor(t *testing.T) {
+	for _, tc := range []struct {
+		cursor, next string
+		loop         bool
+	}{
+		{"same", "same", true}, {" ", " ", true}, {"\t", "\t", true}, {"\u2003", "\u2003", true},
+		{"", "", false}, {"", "next", false}, {"sent", "next", false}, {"sent", "", false},
+	} {
+		t.Run(fmt.Sprintf("%q/%q", tc.cursor, tc.next), func(t *testing.T) {
+			api := newListAPI(t, func(_ string, query url.Values) (int, string) {
+				if query.Get("cursor") != tc.cursor {
+					t.Errorf("sent cursor = %q", query.Get("cursor"))
+				}
+				return 200, rowsPage(1, 1, tc.next)
+			})
+			page, err := api.client(t).Transcripts.Page(context.Background(), &PageOptions{Cursor: tc.cursor})
+			if tc.loop {
+				assertCoreError(t, err, KindUnexpected, "pagination_loop", 0)
+				failure := asError(t, err)
+				if failure.Message != "The API returned the same page cursor it was sent; stopping instead of repeating the page." {
+					t.Errorf("message = %q", failure.Message)
+				}
+				if page != nil {
+					t.Error("loop returned a page")
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if page.NextCursor != tc.next || len(page.Items) != 1 {
+					t.Errorf("page = %+v", page)
+				}
+			}
+			if api.requests() != 1 {
+				t.Errorf("requests = %d", api.requests())
+			}
+		})
+	}
+}
