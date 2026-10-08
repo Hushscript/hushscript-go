@@ -97,7 +97,8 @@ func (t TranscriptsService) List(ctx context.Context, opts *ListOptions) iter.Se
 	})
 }
 
-// Page fetches one page of List.
+// Page fetches one page of List. A page whose NextCursor is the Cursor it was asked with is the
+// pagination_loop error (KindUnexpected), not a page.
 func (t TranscriptsService) Page(ctx context.Context, opts *PageOptions) (*Page[TranscriptSummary], error) {
 	if t.core == nil {
 		return nil, newConfigError(notBuiltMessage)

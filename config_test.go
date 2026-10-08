@@ -279,10 +279,21 @@ func TestRejectsATokenWithCharactersOutsidePrintableASCIIWithoutEchoingIt(t *tes
 
 func TestMissingAndInvalidTokensAreConfigurationErrors(t *testing.T) {
 	t.Setenv("HUSHSCRIPT_TOKEN", "")
-	for _, token := range []string{"", " ", "\t", "hsré"} {
-		t.Run(fmt.Sprintf("%q", token), func(t *testing.T) {
-			_, err := New(WithToken(token))
-			assertCoreError(t, err, KindConfiguration, "config_invalid", 0)
+	const missing = "No Hushscript token: set HUSHSCRIPT_TOKEN or pass a token."
+	const missingHint = "Set HUSHSCRIPT_TOKEN or pass a token. Create one in the Hushscript app: Account → MCP (app.hushscript.com/account/mcp)."
+	for _, tc := range []struct{ token, message, hint string }{
+		{"", missing, missingHint},
+		{" ", missing, missingHint},
+		{"\t", missing, missingHint},
+		{"hsré", "The token contains characters a Hushscript token never has (printable ASCII only).", ""},
+		{"not-a-token", "This doesn't look like a Hushscript token.", ""},
+	} {
+		t.Run(fmt.Sprintf("%q", tc.token), func(t *testing.T) {
+			_, err := New(WithToken(tc.token))
+			failure := wantCoreError(t, err, KindConfiguration, "config_invalid", 0)
+			if failure.Message != tc.message || failure.Hint != tc.hint {
+				t.Errorf("message = %q, hint = %q, want %q and %q", failure.Message, failure.Hint, tc.message, tc.hint)
+			}
 		})
 	}
 }
