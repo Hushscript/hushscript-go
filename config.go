@@ -40,13 +40,17 @@ type config struct {
 	httpClient *http.Client
 	// jitter picks the actual backoff below its ceiling. Tests replace it.
 	jitter func(time.Duration) time.Duration
+	// secrets are other values to redact besides the token: the claim secret while a claim runs.
+	secrets []secret
 }
 
 func (c config) redactor() redactor {
 	if c.tokens != nil {
-		return c.tokens.redactor()
+		r := c.tokens.redactor()
+		r.others = c.secrets
+		return r
 	}
-	return redactor{token: c.token}
+	return redactor{token: c.token, others: c.secrets}
 }
 
 // Option configures New.

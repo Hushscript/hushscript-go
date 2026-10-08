@@ -26,6 +26,8 @@ type redactor struct {
 	token secret
 	// past holds the tokens a rotation replaced.
 	past []secret
+	// others are secrets that are not tokens, such as a claim secret; each is replaced whole.
+	others []secret
 }
 
 func newRedactor(token string) redactor { return redactor{token: newSecret(token)} }
@@ -45,6 +47,11 @@ func (r redactor) apply(text string) string {
 					text = strings.ReplaceAll(text, part, redactedToken)
 				}
 			}
+		}
+	}
+	for _, held := range r.others {
+		if value := held.reveal(); strings.TrimSpace(value) != "" {
+			text = strings.ReplaceAll(text, value, redactedField)
 		}
 	}
 	text = tokenPattern.ReplaceAllString(text, redactedToken)

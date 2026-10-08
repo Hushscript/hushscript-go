@@ -250,6 +250,7 @@ func AgentClaim(ctx context.Context, signupID, claimSecret string, opts ...Optio
 	if err != nil {
 		return nil, err
 	}
+	cfg.secrets = []secret{newSecret(claimSecret)} // redacted from every error of this call, like the token
 	if idErr := checkID(cfg.redactor(), "The signup id", signupID); idErr != nil {
 		return nil, idErr
 	}
