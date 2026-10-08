@@ -426,6 +426,14 @@ minutes of the recording; medical mode and each translation target use more. Cur
 
 Go 1.25 or newer.
 
+## Links
+
+- Documentation: <https://hushscript.com/sdks>
+- REST API reference: <https://hushscript.com/developers>
+- Package on pkg.go.dev: <https://pkg.go.dev/github.com/Hushscript/hushscript-go>
+- Source: <https://github.com/Hushscript/hushscript-go>
+- Other Hushscript SDKs: [TypeScript](https://github.com/Hushscript/hushscript-typescript), [Python](https://github.com/Hushscript/hushscript-python), [PHP](https://github.com/Hushscript/hushscript-php), [CLI](https://github.com/Hushscript/hushscript-cli)
+
 ## Releases
 
 Releases come from release-please. A Go module is published by its tag, so there is no registry
