@@ -144,8 +144,16 @@ func TestAFailureThatIsNotAnSDKErrorAfterTheSendIsUnexpectedError(t *testing.T) 
 	if e.Code != "unexpected_error" || e.Kind != KindUnexpected || e.Status != 0 || e.IdempotencyKey != "k-123456789012345" || e.ResumeToken != "resume-token" {
 		t.Fatalf("error = %+v", e)
 	}
+	if want := "The SDK failed unexpectedly after the request was sent. *errors.errorString: decoder broke while holding hsr…[redacted]"; e.Message != want {
+		t.Errorf("message = %q, want %q", e.Message, want)
+	}
 	if !errors.Is(e, cause) {
 		t.Error("the original is not reachable through errors.Is")
+	}
+	// With only the key the SDK cannot tell whether the create reached the server, and says so.
+	keyOnly := asError(t, (&annotator{core: c, key: "k-123456789012345"}).annotate(context.Background(), cause))
+	if want := "The SDK failed unexpectedly, and the request may or may not have been sent. *errors.errorString: decoder broke while holding hsr…[redacted]"; keyOnly.Code != "unexpected_error" || keyOnly.Message != want {
+		t.Errorf("key only: %q %q, want %q", keyOnly.Code, keyOnly.Message, want)
 	}
 	for _, text := range []string{e.Error(), errors.Unwrap(e).Error()} {
 		if strings.Contains(text, testSecret) {
@@ -154,8 +162,9 @@ func TestAFailureThatIsNotAnSDKErrorAfterTheSendIsUnexpectedError(t *testing.T) 
 	}
 	// Before anything keyed was sent the same failure is the SDK's own request-building error, and a
 	// cancellation stays an abort.
-	if e := asError(t, (&annotator{core: c}).annotate(context.Background(), cause)); e.Code != "config_invalid" {
-		t.Errorf("unkeyed failure is %q", e.Code)
+	unkeyed := asError(t, (&annotator{core: c}).annotate(context.Background(), cause))
+	if want := "The request could not be built. *errors.errorString: decoder broke while holding hsr…[redacted]"; unkeyed.Code != "config_invalid" || unkeyed.Message != want {
+		t.Errorf("unkeyed failure is %q %q, want %q", unkeyed.Code, unkeyed.Message, want)
 	}
 	if e := asError(t, (&annotator{core: c, key: "k-123456789012345"}).annotate(context.Background(), context.Canceled)); e.Kind != KindAbort || e.IdempotencyKey == "" {
 		t.Errorf("a cancellation is %s %q", e.Kind, e.Code)

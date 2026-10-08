@@ -143,7 +143,9 @@ func (a *annotator) annotate(ctx context.Context, err error) error {
 		case ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 			failure = a.core.abortError(err)
 		case a.key != "" || a.token != "":
-			failure = a.core.unexpectedError(err)
+			// With a resume token the create was answered, so its request was sent; with only the key
+			// the create may or may not have reached the server.
+			failure = a.core.unexpectedError(err, a.token != "")
 		default:
 			failure = a.core.requestNotBuilt(err)
 		}
@@ -160,14 +162,19 @@ func (a *annotator) annotate(ctx context.Context, err error) error {
 // requestNotBuilt is the error for a request the SDK could not even build, which only a base URL or a
 // path that cannot form a URL causes.
 func (c *core) requestNotBuilt(cause error) *Error {
-	return newSDKError(KindConfiguration, "config_invalid", "The request could not be built.", cause, c.cfg.redactor(), hintInputs{})
+	return newSDKError(KindConfiguration, "config_invalid", "The request could not be built. "+underlyingError(cause), cause, c.cfg.redactor(), hintInputs{})
 }
 
 // unexpectedError is the error for a failure of the SDK's own after a request was sent that fits no
-// other class (spec 9.2). Its kind is KindUnexpected, the base class, with no status. The original
-// rides along as a redacted cause.
-func (c *core) unexpectedError(cause error) *Error {
-	return newSDKError(KindUnexpected, "unexpected_error", "The SDK failed unexpectedly after the request was sent.", cause, c.cfg.redactor(), hintInputs{})
+// other class (spec 9.2). Its kind is KindUnexpected, the base class, with no status. The message
+// says whether the request was sent only when that is known, and names the original's type; the
+// original rides along as a redacted cause.
+func (c *core) unexpectedError(cause error, requestSent bool) *Error {
+	message := "The SDK failed unexpectedly, and the request may or may not have been sent."
+	if requestSent {
+		message = "The SDK failed unexpectedly after the request was sent."
+	}
+	return newSDKError(KindUnexpected, "unexpected_error", message+" "+underlyingError(cause), cause, c.cfg.redactor(), hintInputs{})
 }
 
 // Transcribe uploads the file at path, waits for it to be transcribed and returns the transcript. The
