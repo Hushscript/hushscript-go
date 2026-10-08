@@ -506,7 +506,7 @@ func TestMutationSumFailsLoudlyOnAMissingOrBrokenShard(t *testing.T) {
 func TestMutationFloorIsStoredOnceAndTheNightlyMatrixCoversEveryFile(t *testing.T) {
 	read := func(name string) string {
 		t.Helper()
-		raw, err := os.ReadFile(name)
+		raw, err := os.ReadFile(name) //nolint:gosec // fixed repository paths
 		if err != nil {
 			t.Fatal(err)
 		}

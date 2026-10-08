@@ -787,7 +787,7 @@ func TestAgentResultsKeepTheirUnknownFieldsInRawButNotInTheirTextForms(t *testin
 			}
 			for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%d", "%x", "%q"} {
 				text := fmt.Sprintf(verb, tc.result)
-				for _, leak := range []string{tc.secret, hex.EncodeToString([]byte(tc.secret)), fmt.Sprint([]byte(tc.secret)), "x_future", fmt.Sprint([]byte(`"x_future"`))} {
+				for _, leak := range []string{tc.secret, hex.EncodeToString([]byte(tc.secret)), fmt.Sprintf("%d", []byte(tc.secret)), "x_future", fmt.Sprintf("%d", []byte(`"x_future"`))} {
 					if strings.Contains(text, leak) {
 						t.Errorf("%s shows %q: %s", verb, leak, text)
 					}
@@ -802,7 +802,7 @@ type echoedBodyError struct{ body string }
 func (e *echoedBodyError) Error() string { return "transport echoed " + e.body }
 
 func TestAClaimSecretEchoedByTheTransportOrTheAPIIsRedactedEverywhere(t *testing.T) {
-	const claimSecret = "cs_very_secret_value"
+	const claimSecret = "cs_very_secret_value" //nolint:gosec // a made-up secret
 	t.Run("transport error", func(t *testing.T) {
 		transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			sent, _ := io.ReadAll(req.Body)

@@ -251,8 +251,8 @@ func (c *core) chooseCard(cards *Cards) (string, *Error) {
 		return cards.DefaultID, nil
 	}
 	var eligible []string
-	for _, card := range cards.Cards {
-		if card.FastCheckoutEligible {
+	for i := range cards.Cards {
+		if card := &cards.Cards[i]; card.FastCheckoutEligible {
 			eligible = append(eligible, card.ID)
 		}
 	}
