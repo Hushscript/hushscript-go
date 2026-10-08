@@ -68,6 +68,7 @@ services:
         && scripts/coverage.sh /tmp/cover.out 85
 
   # go-mutesting on selected source files (nightly). It rewrites sources in place, so it works on a copy.
+  # The justfile supplies the command, and with it the floor, which lives only there.
   mutation:
     <<: *sandboxed
     volumes:
@@ -75,7 +76,7 @@ services:
     environment:
       GOPROXY: "off"
       CONFORMANCE_DIR: /conformance
-    command: ["timeout", "${MUTATION_TIMEOUT:-21600}", "scripts/mutation.sh", "75"]
+      MUTATION_TIMEOUT: ${MUTATION_TIMEOUT:-21600}
 
   # Native fuzz targets, one at a time (nightly).
   fuzz:
@@ -95,7 +96,7 @@ services:
       - >-
         go build ./...
         && formatted="$(go tool -modfile=tools/go.mod gofumpt -l $(find . -name '*.go' -not -path './generated/*'))"
-        && test -z "$$formatted"
+        && { test -z "$$formatted" || { echo "gofumpt: unformatted files:"; echo "$$formatted"; exit 1; }; }
         && timeout 900 golangci-lint run ./...
 
   conformance:

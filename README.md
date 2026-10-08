@@ -452,6 +452,11 @@ conformance fixtures (`fixtures/hint-rendering.json`) and fail without them: `ju
 `just mutation` find a checkout through `CONFORMANCE_DIR`, then a local `CONFORMANCE_CONTEXT`, then
 a clone of the pinned tag (`scripts/conformance-dir.sh`).
 
+`just mutation` runs go-mutesting on the HTTP core and transcribe pipeline against the floor in the justfile
+(`mutation_floor`). The nightly workflow runs one `just mutation-shard` job per source file; each writes its
+killed and scored counts and fails only on a timeout or output it cannot read, and a final job runs
+`just mutation-sum` to enforce the floor on the total of all eight files.
+
 `generated/` is never edited by hand. `scripts/generate.go` also declares one path parameter the
 API document leaves out (`signup_id` on the claim operation), in a private copy of the spec.
 

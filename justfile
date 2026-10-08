@@ -18,6 +18,8 @@ gitleaks_image := "ghcr.io/gitleaks/gitleaks:v8.28.0@sha256:cdbb7c955abce02001a9
 sandbox := "--rm --init --label sdk.test=1 --cap-drop ALL --read-only --security-opt no-new-privileges --pids-limit 512 --memory 4g --tmpfs /tmp"
 floor := "1.25"
 latest := "1.27"
+# The one place the mutation floor lives: a percentage, enforced on the killed/scored total of all eight files.
+mutation_floor := "75"
 
 # unit tests with the race detector and the coverage floor on Go 1.25 (default) or 1.27; no network beyond the mock (the hint tests read the conformance fixtures: CONFORMANCE_DIR, else CONFORMANCE_CONTEXT, else a clone of the pinned tag)
 test version=floor:
@@ -31,7 +33,7 @@ test version=floor:
     docker compose build mock test
     docker compose run --rm test
 
-# go-mutesting on selected source files (all eight by default; nightly uses one per job)
+# go-mutesting on selected source files (all eight by default), failing below the floor; MUTATION_TIMEOUT seconds (default 21600) bound the run
 [positional-arguments]
 mutation version=floor *files:
     #!/usr/bin/env bash
@@ -43,7 +45,28 @@ mutation version=floor *files:
     trap 'docker compose down --remove-orphans >/dev/null 2>&1 || true' EXIT
     docker compose build mock mutation
     shift
-    docker compose run --rm mutation timeout "${MUTATION_TIMEOUT:-21600}" scripts/mutation.sh 75 "$@"
+    docker compose run --rm mutation scripts/mutation.sh {{mutation_floor}} "$@"
+
+# nightly shard: go-mutesting on one source file, its killed and scored counts written to <counts_dir>/<file>.counts on the host; fails only on a timeout or output it cannot read, the floor is enforced on the total by mutation-sum
+mutation-shard file counts_dir version=floor:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{ if version == "1.25" { "" } else if version == "1.27" { "" } else { error("version must be 1.25 or 1.27") } }}
+    export GO_VERSION={{version}}
+    CONFORMANCE_DIR="$(scripts/conformance-dir.sh)"
+    export CONFORMANCE_DIR
+    mkdir -p "{{counts_dir}}"
+    counts="$(realpath "{{counts_dir}}")"
+    trap 'docker compose down --remove-orphans >/dev/null 2>&1 || true' EXIT
+    docker compose build mock mutation
+    # The container's root is read-only; the counts directory is its one writable mount, owned by the caller.
+    docker compose run --rm --user "$(id -u):$(id -g)" -v "$counts":/counts mutation scripts/mutation.sh --counts "/counts/{{file}}.counts" "{{file}}"
+
+# add up the counts of every nightly shard in counts_dir (plain bash and awk, no container) and enforce the floor on the total
+mutation-sum counts_dir:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/mutation.sh --sum {{mutation_floor}} "{{counts_dir}}"/*.counts
 
 # native fuzz targets, FUZZ_TIME each (default 60s; nightly)
 fuzz version=floor:
