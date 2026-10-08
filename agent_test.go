@@ -741,3 +741,57 @@ func TestAgentClaimIDsAreRejectedBeforeAnyRequest(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentResultsKeepTheirUnknownFieldsInRawButNotInTheirTextForms(t *testing.T) {
+	future := `"x_future":{"deeper":[1,null,"x"]}`
+	signup := `{"signup_id":"hsr1:eu:abc123","claim_secret":"cs_secret","checkout_url":"https://pay.example/c/1","amount":199,"currency":"usd","expires_at":1760001800,` + future + `}`
+	claim := `{"pat":"` + newTokenText + `","user_id":"u_1","scopes":["transcribe"],"balance_seconds":2700,` + future + `}`
+	rotate := `{"pat":"` + newTokenText + `","pat_id":"pat_2","scopes":["transcribe"],"expires_at":null,` + future + `}`
+	srv := newRouteServer(t, func(rec recorded, _ int) step {
+		switch rec.method + " " + rec.path {
+		case signupRoute:
+			return ok(signup)
+		case claimRoute:
+			return ok(claim)
+		case rotateRoute:
+			return ok(rotate)
+		}
+		return step{status: 404, body: jsonError("not_found", 4040)}
+	})
+	signedUp, err := AgentSignup(context.Background(), request(), tokenless(srv)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := AgentClaim(context.Background(), "sg_1", "cs_secret", tokenless(srv)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := newTestClient(t, srv.URL, newFakeClock(), WithToken(testToken)).Agent.RotateToken(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		result any
+		want   string
+		secret string
+	}{
+		{"signup", *signedUp, signup, "cs_secret"},
+		{"claim", *claimed, claim, newTokenText},
+		{"rotate", *rotated, rotate, newTokenText},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nestedRaw(t, tc.result); got != tc.want {
+				t.Errorf("Raw = %s, want %s", got, tc.want)
+			}
+			for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%d", "%x", "%q"} {
+				text := fmt.Sprintf(verb, tc.result)
+				for _, leak := range []string{tc.secret, hex.EncodeToString([]byte(tc.secret)), fmt.Sprint([]byte(tc.secret)), "x_future", fmt.Sprint([]byte(`"x_future"`))} {
+					if strings.Contains(text, leak) {
+						t.Errorf("%s shows %q: %s", verb, leak, text)
+					}
+				}
+			}
+		})
+	}
+}

@@ -35,6 +35,8 @@ type Account struct {
 	Limits     UploadLimits
 	// PurchasesRemainingInWindow is set for agent accounts only; nil otherwise.
 	PurchasesRemainingInWindow *int
+	// Raw is the answer as the API sent it, unknown fields included.
+	Raw json.RawMessage
 }
 
 // Balance is what an account can spend.
@@ -50,6 +52,8 @@ type Balance struct {
 	ExpiresAt *time.Time
 	// PurchasesRemaining is set for agent accounts only; nil otherwise.
 	PurchasesRemaining *int
+	// Raw is the account answer it was read from as the API sent it, unknown fields included.
+	Raw json.RawMessage
 }
 
 type accountBody struct {
@@ -60,6 +64,7 @@ type accountBody struct {
 	DataRegion                 string     `json:"data_region"`
 	PurchasesRemainingInWindow *int       `json:"purchases_remaining_in_window"`
 	Limits                     limitsBody `json:"limits"`
+	raw                        json.RawMessage
 }
 
 type limitsBody struct {
@@ -115,6 +120,7 @@ func (c *core) readAccount(ctx context.Context, required ...string) (accountBody
 	if json.Unmarshal(response.Body, &body) != nil {
 		return accountBody{}, c.badResponse(route, response.StatusCode())
 	}
+	body.raw = bytes.Clone(response.Body)
 	return body, nil
 }
 
@@ -125,7 +131,7 @@ func (c *core) balance(ctx context.Context) (*Balance, error) {
 	}
 	return &Balance{
 		Seconds: body.BalanceSeconds, Minutes: body.BalanceSeconds / 60, HeldSeconds: body.HeldSeconds,
-		ExpiresAt: body.expiry(), PurchasesRemaining: body.PurchasesRemainingInWindow,
+		ExpiresAt: body.expiry(), PurchasesRemaining: body.PurchasesRemainingInWindow, Raw: bytes.Clone(body.raw),
 	}, nil
 }
 
@@ -156,6 +162,6 @@ func (c Client) Account(ctx context.Context) (*Account, error) {
 	return &Account{
 		BalanceSeconds: body.BalanceSeconds, HeldSeconds: body.HeldSeconds, CreditsExpireAt: body.expiry(),
 		CardOnFile: body.CardOnFile, DataRegion: body.DataRegion, PurchasesRemainingInWindow: body.PurchasesRemainingInWindow,
-		Limits: body.Limits.limits(),
+		Limits: body.Limits.limits(), Raw: body.raw,
 	}, nil
 }

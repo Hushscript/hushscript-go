@@ -403,8 +403,12 @@ retries, timeouts and redaction:
 response, err := client.API().GetAccountWithResponse(ctx)
 ```
 
-`Job.Options` and `UploadLimits` are typed, so a key the API adds to them later is not kept there;
-`client.API()` returns the whole body.
+The friendly results keep what the API sent in a `Raw` field, unknown fields included: `Account`, `Balance`,
+`Job`, `Pack`, `Card`, `Cards`, `Purchase`, `Transaction`, `LedgerEntry`, `Hold`, `TranscriptSummary`,
+`DeletedTranscript`, `Utterance`, the agent results, and the nested `UploadLimits` and `JobOptions`.
+`AgentSignupResult.Raw`, `AgentAccount.Raw` and `RotatedToken.Raw` hold a secret, so no text form of those
+results prints it. Structs with a `Raw` field cannot be compared with `==`, and `json.Marshal` of them now
+writes a `Raw` key. `client.API()` returns the whole body as well.
 
 ## Server only
 

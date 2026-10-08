@@ -50,6 +50,8 @@ type Job struct {
 	RetryOf   string
 	CreatedAt time.Time
 	Options   JobOptions
+	// Raw is the job as the API sent it, unknown fields included.
+	Raw json.RawMessage
 }
 
 type jobBody struct {
@@ -92,11 +94,11 @@ func valueOf(s *string) string {
 	return *s
 }
 
-func (b jobBody) job() *Job {
+func (b jobBody) job(raw json.RawMessage) *Job {
 	job := &Job{
 		ID: b.ID, State: b.State, TranscriptID: valueOf(b.TranscriptID), Error: valueOf(b.Error), FailureKind: valueOf(b.FailureKind),
 		Mode: b.Mode, DeclaredSeconds: b.DeclaredSeconds, VerifiedSeconds: b.VerifiedSeconds, ActualSeconds: b.ActualSeconds,
-		BillableSeconds: b.BillableSeconds, RetryOf: valueOf(b.RetryOf),
+		BillableSeconds: b.BillableSeconds, RetryOf: valueOf(b.RetryOf), Raw: raw,
 		Options: JobOptions{
 			LanguageCode: valueOf(b.Options.LanguageCode), SpeakerDetection: b.Options.SpeakerDetection, MedicalMode: b.Options.MedicalMode,
 			Multichannel: b.Options.Multichannel, TranslationTargets: b.Options.TranslationTargets, Keyterms: b.Options.Keyterms,
@@ -166,13 +168,13 @@ func (j JobsService) List(ctx context.Context, opts *JobListOptions) iter.Seq2[J
 		if !rowsHave(response.Body, "jobs", "id", "state", "created_at") {
 			return Page[Job]{}, core.badResponse(route, response.StatusCode())
 		}
-		rows, _, cursor, ok := listRows[jobBody](response.Body, "jobs")
+		rows, raws, cursor, ok := listRows[jobBody](response.Body, "jobs")
 		if !ok {
 			return Page[Job]{}, core.badResponse(route, response.StatusCode())
 		}
 		page := Page[Job]{NextCursor: cursor, Items: make([]Job, len(rows))}
 		for i := range rows {
-			page.Items[i] = *rows[i].job()
+			page.Items[i] = *rows[i].job(raws[i])
 		}
 		return page, nil
 	})

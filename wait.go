@@ -32,7 +32,7 @@ func (c *core) readJob(ctx context.Context, id string) (*Job, error) {
 	if json.Unmarshal(response.Body, &body) != nil || (body.TranscriptID != nil && !safeSegment(*body.TranscriptID)) {
 		return nil, c.badResponse(route, response.StatusCode())
 	}
-	return body.job(), nil
+	return body.job(bytes.Clone(response.Body)), nil
 }
 
 // badResponse is the error for a 2xx answer the SDK cannot use: an ApiError with the status the API
