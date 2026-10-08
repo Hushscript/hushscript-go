@@ -20,6 +20,8 @@ type TranscriptSummary struct {
 	// AutoDeleteAt is when the transcript is scheduled to be purged; nil keeps it indefinitely.
 	AutoDeleteAt *time.Time
 	Tags         []string
+	// Raw is the row as the API sent it, unknown fields included.
+	Raw json.RawMessage
 }
 
 // DeletedTranscript is the record kept after a transcript was removed; its content is gone.
@@ -36,6 +38,18 @@ type DeletedTranscript struct {
 	// Receipt is the stored deletion receipt, opaque and as the API sends it (snake_case keys, string
 	// timestamps); nil when it could not be read back.
 	Receipt map[string]any
+	// Raw is the row as the API sent it, unknown fields included.
+	Raw json.RawMessage
+}
+
+type deletedRow struct {
+	ID              string         `json:"id"`
+	Title           string         `json:"title"`
+	DurationSeconds int            `json:"duration_seconds"`
+	CreatedAt       int64          `json:"created_at"`
+	DeletedAt       int64          `json:"deleted_at"`
+	Cause           string         `json:"cause"`
+	Receipt         map[string]any `json:"receipt"`
 }
 
 // TranscriptsService is the friendly layer over the transcript endpoints: Client.Transcripts.
@@ -83,7 +97,8 @@ func (t TranscriptsService) List(ctx context.Context, opts *ListOptions) iter.Se
 	})
 }
 
-// Page fetches one page of List.
+// Page fetches one page of List. A page whose NextCursor is the Cursor it was asked with is the
+// pagination_loop error (KindUnexpected), not a page.
 func (t TranscriptsService) Page(ctx context.Context, opts *PageOptions) (*Page[TranscriptSummary], error) {
 	if t.core == nil {
 		return nil, newConfigError(notBuiltMessage)
@@ -97,6 +112,9 @@ func (t TranscriptsService) Page(ctx context.Context, opts *PageOptions) (*Page[
 	page, err := t.core.transcriptPage(ctx, opts.Cursor, opts.PageSize)
 	if err != nil {
 		return nil, (&annotator{core: t.core}).annotate(ctx, err)
+	}
+	if page.NextCursor != "" && page.NextCursor == opts.Cursor {
+		return nil, t.core.paginationLoop()
 	}
 	return &page, nil
 }
@@ -121,13 +139,16 @@ func (c *core) transcriptPage(ctx context.Context, cursor string, size int) (Pag
 	if !rowsHave(response.Body, "transcripts", "id", "created_at") {
 		return Page[TranscriptSummary]{}, c.badResponse(route, response.StatusCode())
 	}
-	list := parsed
-	page := Page[TranscriptSummary]{NextCursor: valueOf(list.NextCursor), Items: make([]TranscriptSummary, len(list.Transcripts))}
-	for i := range list.Transcripts {
-		row := &list.Transcripts[i]
+	rows, raws, cursor, ok := listRows[generated.TranscriptListRow](response.Body, "transcripts")
+	if !ok {
+		return Page[TranscriptSummary]{}, c.badResponse(route, response.StatusCode())
+	}
+	page := Page[TranscriptSummary]{NextCursor: cursor, Items: make([]TranscriptSummary, len(rows))}
+	for i := range rows {
+		row := &rows[i]
 		summary := TranscriptSummary{
 			ID: row.Id, Title: row.Title, Language: valueOf(row.LanguageDetected), DurationSeconds: row.DurationSeconds,
-			CreatedAt: unixTime(int64(row.CreatedAt)), Tags: row.Tags,
+			CreatedAt: unixTime(int64(row.CreatedAt)), Tags: row.Tags, Raw: raws[i],
 		}
 		if summary.Tags == nil {
 			summary.Tags = []string{}
@@ -179,26 +200,15 @@ func (t TranscriptsService) Deleted(ctx context.Context) iter.Seq2[DeletedTransc
 		if !rowsHave(response.Body, "deleted", "id", "created_at", "deleted_at") {
 			return Page[DeletedTranscript]{}, core.badResponse(route, response.StatusCode())
 		}
-		var body struct {
-			Deleted []struct {
-				ID              string         `json:"id"`
-				Title           string         `json:"title"`
-				DurationSeconds int            `json:"duration_seconds"`
-				CreatedAt       int64          `json:"created_at"`
-				DeletedAt       int64          `json:"deleted_at"`
-				Cause           string         `json:"cause"`
-				Receipt         map[string]any `json:"receipt"`
-			} `json:"deleted"`
-			NextCursor *string `json:"next_cursor"`
-		}
-		if json.Unmarshal(response.Body, &body) != nil {
+		rows, raws, cursor, ok := listRows[deletedRow](response.Body, "deleted")
+		if !ok {
 			return Page[DeletedTranscript]{}, core.badResponse(route, response.StatusCode())
 		}
-		page := Page[DeletedTranscript]{NextCursor: valueOf(body.NextCursor), Items: make([]DeletedTranscript, len(body.Deleted))}
-		for i, row := range body.Deleted {
+		page := Page[DeletedTranscript]{NextCursor: cursor, Items: make([]DeletedTranscript, len(rows))}
+		for i, row := range rows {
 			page.Items[i] = DeletedTranscript{
 				ID: row.ID, Title: row.Title, DurationSeconds: row.DurationSeconds, CreatedAt: unixTime(row.CreatedAt),
-				DeletedAt: unixTime(row.DeletedAt), Cause: row.Cause, Receipt: row.Receipt,
+				DeletedAt: unixTime(row.DeletedAt), Cause: row.Cause, Receipt: row.Receipt, Raw: raws[i],
 			}
 		}
 		return page, nil

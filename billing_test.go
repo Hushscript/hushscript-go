@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -573,5 +574,164 @@ func TestCanceledBillingCallsSendNothingAndCarryNoPurchaseKey(t *testing.T) {
 				t.Errorf("status %d, key %q, requests %v, cause %v", e.Status, e.IdempotencyKey, srv.all(), e.Unwrap())
 			}
 		})
+	}
+}
+
+func nestedRaw(t *testing.T, model any) string {
+	t.Helper()
+	field := reflect.ValueOf(model).FieldByName("Raw")
+	if !field.IsValid() {
+		t.Fatalf("%T has no Raw field", model)
+	}
+	raw, ok := field.Interface().(json.RawMessage)
+	if !ok {
+		t.Fatalf("%T.Raw is %T, want json.RawMessage", model, field.Interface())
+	}
+	return string(raw)
+}
+
+func TestNestedAccountLimitsAndJobOptionsKeepTheirOwnRaw(t *testing.T) {
+	for _, unknown := range []string{`null`, `""`, `"   "`, `"\t"`, `"\u2003"`, `false`, `0`, `[]`, `{"deeper":[1,null,"x"]}`} {
+		t.Run(unknown, func(t *testing.T) {
+			limits := `{"max_daily_seconds":9,"max_active_jobs":3,"active_jobs":1,"used_today_seconds":2,"future":` + unknown + `}`
+			accountServer := newScriptedServer(t, step{status: 200, headers: map[string]string{"Content-Type": "application/json"}, body: `{"balance_seconds":90,"held_seconds":10,"card_on_file":true,"data_region":"eu","credits_expire_at":null,"limits":` + limits + `}`})
+			account, err := newTestClient(t, accountServer.URL, newFakeClock()).Account(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if account.Limits.MaxDailySeconds != 9 || account.Limits.MaxActiveJobs != 3 || account.Limits.ActiveJobs != 1 || account.Limits.UsedTodaySeconds != 2 {
+				t.Fatalf("limits = %+v", account.Limits)
+			}
+			if raw := nestedRaw(t, account.Limits); raw != limits {
+				t.Errorf("limits Raw = %s, want %s", raw, limits)
+			}
+			options := `{"language_code":null,"speaker_detection":true,"translation_targets":["fr"],"future":` + unknown + `}`
+			jobServer := newScriptedServer(t, step{status: 200, headers: map[string]string{"Content-Type": "application/json"}, body: `{"id":"job_1","state":"done","created_at":1,"options":` + options + `}`})
+			job, err := newTestClient(t, jobServer.URL, newFakeClock()).Jobs.Get(context.Background(), "job_1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if job.Options.LanguageCode != "" || !job.Options.SpeakerDetection || strings.Join(job.Options.TranslationTargets, ",") != "fr" {
+				t.Fatalf("options = %+v", job.Options)
+			}
+			if raw := nestedRaw(t, job.Options); raw != options {
+				t.Errorf("options Raw = %s, want %s", raw, options)
+			}
+		})
+	}
+}
+
+func TestTopLevelResultsKeepTheirUnknownFieldsInRaw(t *testing.T) {
+	future := `"x_future":{"deeper":[1,null,"x"]}`
+	account := `{"balance_seconds":90,"held_seconds":10,"card_on_file":true,"data_region":"eu","credits_expire_at":null,` +
+		`"limits":{"max_daily_seconds":9,"max_active_jobs":3,"active_jobs":1,"used_today_seconds":2},` + future + `}`
+	packA := `{"id":"45min","seconds":2700,"amount":199,"currency":"usd","referral_bonus_seconds":0,"x_a":1}`
+	packB := `{"id":"300min","seconds":18000,"amount":599,"currency":"usd","referral_bonus_seconds":0,"x_b":"two"}`
+	cardA, cardB := card("pm_1", true, true), card("pm_2", false, true)
+	cardA, cardB = strings.Replace(cardA, `{`, `{"x_a":1,`, 1), strings.Replace(cardB, `{`, `{"x_b":"two",`, 1)
+	cards := cardsBody("pm_1", cardA, cardB)
+	cards = strings.Replace(cards, `{`, `{`+future+`,`, 1)
+	purchase := `{"status":"ok","balance_seconds":600,` + future + `}`
+	transactions := []string{
+		`{"id":7,"seconds":18000,"amount_cents":599,"amount_refunded_cents":0,"currency":"usd","status":"succeeded","created_at":1760000000,"x_a":1}`,
+		`{"id":8,"seconds":600,"amount_cents":99,"amount_refunded_cents":0,"currency":"usd","status":"succeeded","created_at":1760000001,"x_b":"two"}`,
+	}
+	entries := []string{
+		`{"id":3,"delta_seconds":-60,"kind":"settle","job_id":"j1","note":null,"created_at":1760000001,"x_a":1}`,
+		`{"id":4,"delta_seconds":60,"kind":"release","job_id":null,"note":"n","created_at":1760000002,"x_b":"two"}`,
+	}
+	holds := []string{
+		`{"id":"j1","kind":"transcription","seconds":120,"created_at":1760000002,"x_a":1}`,
+		`{"id":"j2","kind":"insights","seconds":30,"created_at":1760000003,"x_b":"two"}`,
+	}
+	jobOne := jobJSON("j1", "done", `,"x_a":1`)
+	jobTwo := jobJSON("j2", "queued", `,"x_b":"two"`)
+	api := newRouteServer(t, func(rec recorded, _ int) step {
+		switch rec.method + " " + rec.path {
+		case "GET /v1/account":
+			return ok(account)
+		case "GET /v1/jobs/j1":
+			return ok(jobOne)
+		case "GET /v1/jobs":
+			return ok(`{"jobs":[` + jobOne + `,` + jobTwo + `],"next_cursor":null}`)
+		case "GET /v1/billing/packs":
+			return ok(`{"packs":[` + packA + `,` + packB + `]}`)
+		case cardsRoute:
+			return ok(cards)
+		case purchaseRoute:
+			return ok(purchase)
+		case "GET /v1/billing/transactions":
+			return ok(`{"account_reference":"acc","transactions":[` + strings.Join(transactions, ",") + `],"next_cursor":null}`)
+		case "GET /v1/billing/ledger":
+			return ok(`{"entries":[` + strings.Join(entries, ",") + `],"next_cursor":null}`)
+		case "GET /v1/billing/holds":
+			return ok(`{"holds":[` + strings.Join(holds, ",") + `],"next_cursor":null}`)
+		}
+		return step{status: 404, body: jsonError("not_found", 4040)}
+	})
+	client := api.client(t)
+	ctx := context.Background()
+	check := func(what string, model any, want string) {
+		t.Helper()
+		if got := nestedRaw(t, model); got != want {
+			t.Errorf("%s Raw = %s, want %s", what, got, want)
+		}
+	}
+
+	gotAccount, err := client.Account(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("Account", *gotAccount, account)
+	balance, err := client.Balance(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("Balance", *balance, account)
+	gotJob, err := client.Jobs.Get(ctx, "j1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("Job", *gotJob, jobOne)
+	jobs, err := drain(client.Jobs.List(ctx, nil))
+	if err != nil || len(jobs) != 2 {
+		t.Fatalf("jobs = %v, %v", jobs, err)
+	}
+	check("listed Job 1", jobs[0], jobOne)
+	check("listed Job 2", jobs[1], jobTwo)
+	packs, err := client.Billing.Packs(ctx)
+	if err != nil || len(packs) != 2 {
+		t.Fatalf("packs = %v, %v", packs, err)
+	}
+	check("Pack 1", packs[0], packA)
+	check("Pack 2", packs[1], packB)
+	gotCards, err := client.Billing.Cards(ctx)
+	if err != nil || len(gotCards.Cards) != 2 {
+		t.Fatalf("cards = %v, %v", gotCards, err)
+	}
+	check("Cards", *gotCards, cards)
+	check("Card 1", gotCards.Cards[0], cardA)
+	check("Card 2", gotCards.Cards[1], cardB)
+	bought, err := client.Billing.Buy(ctx, "45min", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("Purchase", *bought, purchase)
+	gotTransactions, err := drain(client.Billing.Transactions(ctx))
+	if err != nil || len(gotTransactions) != 2 {
+		t.Fatalf("transactions = %v, %v", gotTransactions, err)
+	}
+	gotEntries, err := drain(client.Billing.Ledger(ctx))
+	if err != nil || len(gotEntries) != 2 {
+		t.Fatalf("entries = %v, %v", gotEntries, err)
+	}
+	gotHolds, err := drain(client.Billing.Holds(ctx))
+	if err != nil || len(gotHolds) != 2 {
+		t.Fatalf("holds = %v, %v", gotHolds, err)
+	}
+	for i := range 2 {
+		check("Transaction", gotTransactions[i], transactions[i])
+		check("LedgerEntry", gotEntries[i], entries[i])
+		check("Hold", gotHolds[i], holds[i])
 	}
 }

@@ -378,17 +378,21 @@ ffmpeg -i input -vn -c:a libopus output.opus
 | `WithHTTPClient` | none                  | a plain `http.Client` that never follows redirects                           |
 | `WithClock`      | none                  | the system clock; pass a `Clock` in tests                                    |
 
-An explicit option beats its environment variable. The base URL must be `https://`, or `http://` to
-`localhost`, `127.0.0.1` or `[::1]`, with no path. Each upload part has its own 300 s timeout, which
-you cannot change. `WithHTTPClient` takes a shallow copy of the `*http.Client` at `New`, so
-reassigning its fields afterwards does not reach the SDK.
+An explicit option beats its environment variable. A token, base URL or log level that is empty or
+only whitespace, as an option or in its environment variable, counts as not set: the option falls
+back to the environment variable, then to the default, and a missing token is a configuration
+error. The base URL must be `https://`, or `http://` to `localhost`, `127.0.0.1` or `[::1]`, with
+no path. Each upload part has its own 300 s timeout, which you cannot change. `WithHTTPClient`
+takes a shallow copy of the `*http.Client` at `New`, so reassigning its fields afterwards does not
+reach the SDK.
 
 ## Privacy
 
 The SDK sends no telemetry. The only client identification is the `User-Agent` header
-(`hushscript-go/<version> go/<version>`). Logging is off by default; `HUSHSCRIPT_LOG=debug` (or
-`WithLogLevel("debug")`, or `WithLogger`) writes one line per request attempt with the method, path,
-status and timing, and never a header, body, title or transcript text.
+(`hushscript-go/<version> go/<version>`, or `go/devel` on a toolchain without a numeric version).
+Logging is off by default; `HUSHSCRIPT_LOG=debug` (or `WithLogLevel("debug")`, or `WithLogger`)
+writes one line per request attempt with the method, path, status and timing, and never a header,
+body, title or transcript text.
 
 ## The low-level API
 
@@ -399,8 +403,12 @@ retries, timeouts and redaction:
 response, err := client.API().GetAccountWithResponse(ctx)
 ```
 
-`Job.Options` and `UploadLimits` are typed, so a key the API adds to them later is not kept there;
-`client.API()` returns the whole body.
+The friendly results keep what the API sent in a `Raw` field, unknown fields included: `Account`, `Balance`,
+`Job`, `Pack`, `Card`, `Cards`, `Purchase`, `Transaction`, `LedgerEntry`, `Hold`, `TranscriptSummary`,
+`DeletedTranscript`, `Utterance`, the agent results, and the nested `UploadLimits` and `JobOptions`.
+`AgentSignupResult.Raw`, `AgentAccount.Raw` and `RotatedToken.Raw` hold a secret, so no text form of those
+results prints it. Structs with a `Raw` field cannot be compared with `==`, and `json.Marshal` of them now
+writes a `Raw` key. `client.API()` returns the whole body as well.
 
 ## Server only
 
@@ -443,6 +451,11 @@ repository is public, point the mock and the fixtures at a local checkout:
 conformance fixtures (`fixtures/hint-rendering.json`) and fail without them: `just test` and
 `just mutation` find a checkout through `CONFORMANCE_DIR`, then a local `CONFORMANCE_CONTEXT`, then
 a clone of the pinned tag (`scripts/conformance-dir.sh`).
+
+`just mutation` runs go-mutesting on the HTTP core and transcribe pipeline against the floor in the justfile
+(`mutation_floor`). The nightly workflow runs one `just mutation-shard` job per source file; each writes its
+killed and scored counts and fails only on a timeout or output it cannot read, and a final job runs
+`just mutation-sum` to enforce the floor on the total of all eight files.
 
 `generated/` is never edited by hand. `scripts/generate.go` also declares one path parameter the
 API document leaves out (`signup_id` on the claim operation), in a private copy of the spec.

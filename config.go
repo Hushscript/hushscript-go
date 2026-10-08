@@ -40,30 +40,42 @@ type config struct {
 	httpClient *http.Client
 	// jitter picks the actual backoff below its ceiling. Tests replace it.
 	jitter func(time.Duration) time.Duration
+	// secrets are other values to redact besides the token: the claim secret while a claim runs.
+	secrets []secret
 }
 
 func (c config) redactor() redactor {
 	if c.tokens != nil {
-		return c.tokens.redactor()
+		r := c.tokens.redactor()
+		r.others = c.secrets
+		return r
 	}
-	return redactor{token: c.token}
+	return redactor{token: c.token, others: c.secrets}
 }
 
 // Option configures New.
 type Option func(*config) error
 
-// WithToken sets the API token. Without it, New reads HUSHSCRIPT_TOKEN.
+// WithToken sets the API token. An empty or whitespace-only token counts as not set, and so does
+// an empty or whitespace-only HUSHSCRIPT_TOKEN: New reads HUSHSCRIPT_TOKEN when the option is not set.
 func WithToken(token string) Option {
 	return func(c *config) error {
+		if isBlank(token) {
+			return nil
+		}
 		c.token = newSecret(token)
 		return nil
 	}
 }
 
 // WithBaseURL sets the API host. It must be https, or http to localhost, 127.0.0.1 or [::1] (the
-// conformance mock). Without it, New reads HUSHSCRIPT_BASE_URL and then uses https://api.hushscript.com.
+// conformance mock). An empty or whitespace-only value counts as not set: New reads HUSHSCRIPT_BASE_URL
+// and then uses https://api.hushscript.com.
 func WithBaseURL(baseURL string) Option {
 	return func(c *config) error {
+		if isBlank(baseURL) {
+			return nil
+		}
 		validated, err := validateBaseURL(baseURL)
 		if err != nil {
 			return err
@@ -107,9 +119,13 @@ func WithLogger(logger *slog.Logger) Option {
 }
 
 // WithLogLevel sets the log level to "off" or "debug". It beats HUSHSCRIPT_LOG, so WithLogLevel("off")
-// silences HUSHSCRIPT_LOG=debug. "debug" without WithLogger logs to standard error.
+// silences HUSHSCRIPT_LOG=debug. "debug" without WithLogger logs to standard error. An empty or
+// whitespace-only level counts as not set: New reads HUSHSCRIPT_LOG.
 func WithLogLevel(level string) Option {
 	return func(c *config) error {
+		if isBlank(level) {
+			return nil
+		}
 		if level != logOff && level != logDebug {
 			return newConfigError("The log level must be off or debug.")
 		}
@@ -180,6 +196,10 @@ func validateBaseURL(raw string) (*url.URL, error) {
 	return &url.URL{Scheme: parsed.Scheme, Host: parsed.Host}, nil
 }
 
+// isBlank reports whether text is empty or only whitespace: an option or environment variable like
+// that counts as not set.
+func isBlank(text string) bool { return strings.TrimSpace(text) == "" }
+
 // validToken reports whether every byte is printable ASCII (0x21 to 0x7E), so the token can sit in
 // a header and never carries a space, control character or non-ASCII byte.
 func validToken(token string) bool {
@@ -207,7 +227,9 @@ func resolveConfig(opts []Option, withToken bool) (config, error) {
 	}
 	if withToken {
 		if c.token.isEmpty() {
-			c.token = newSecret(os.Getenv("HUSHSCRIPT_TOKEN"))
+			if env := os.Getenv("HUSHSCRIPT_TOKEN"); !isBlank(env) {
+				c.token = newSecret(env)
+			}
 		}
 		if c.token.isEmpty() {
 			failure := newConfigError(missingTokenMessage)
@@ -226,7 +248,7 @@ func resolveConfig(opts []Option, withToken bool) (config, error) {
 	c.tokens = newTokenBox(c.token.reveal())
 	if c.baseURL == "" {
 		base := os.Getenv("HUSHSCRIPT_BASE_URL")
-		if base == "" {
+		if isBlank(base) {
 			base = defaultBaseURL
 		}
 		validated, err := validateBaseURL(base)

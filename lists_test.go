@@ -476,7 +476,7 @@ func TestBalanceAndAccountReadTheOptionalFieldsAsNilWhenAbsent(t *testing.T) {
 	}
 	if a.BalanceSeconds != 90 || a.HeldSeconds != 10 || a.CreditsExpireAt != nil || !a.CardOnFile || a.DataRegion != "eu" ||
 		a.PurchasesRemainingInWindow == nil || *a.PurchasesRemainingInWindow != 0 ||
-		a.Limits != (UploadLimits{MaxDailySeconds: 36000, MaxActiveJobs: 50, ActiveJobs: 1, UsedTodaySeconds: 600}) {
+		a.Limits.MaxDailySeconds != 36000 || a.Limits.MaxActiveJobs != 50 || a.Limits.ActiveJobs != 1 || a.Limits.UsedTodaySeconds != 600 {
 		t.Errorf("account = %+v", a)
 	}
 	plain := newListAPI(t, func(string, url.Values) (int, string) { return 200, fmt.Sprintf(accountJSON(""), 90, 10, "null") })
@@ -606,6 +606,180 @@ func TestCanceledCoreEntrypointsSendNoRequest(t *testing.T) {
 			e := wantCoreError(t, err, KindAbort, "aborted", 0)
 			if !errors.Is(err, context.Canceled) || e.IdempotencyKey != "" || srv.count() != 0 {
 				t.Errorf("cancel: %v, key %q, requests %d", err, e.IdempotencyKey, srv.count())
+			}
+		})
+	}
+}
+
+func TestTranscriptPageRejectsRepeatedNonemptyCursor(t *testing.T) {
+	for _, tc := range []struct {
+		cursor, next string
+		loop         bool
+	}{
+		{"same", "same", true},
+		{" ", " ", true},
+		{"\t", "\t", true},
+		{"\u2003", "\u2003", true},
+		{"", "", false},
+		{"", "next", false},
+		{"sent", "next", false},
+		{"sent", "", false},
+	} {
+		t.Run(fmt.Sprintf("%q/%q", tc.cursor, tc.next), func(t *testing.T) {
+			api := newListAPI(t, func(_ string, query url.Values) (int, string) {
+				if query.Get("cursor") != tc.cursor {
+					t.Errorf("sent cursor = %q", query.Get("cursor"))
+				}
+				return 200, rowsPage(1, 1, tc.next)
+			})
+			page, err := api.client(t).Transcripts.Page(context.Background(), &PageOptions{Cursor: tc.cursor})
+			if tc.loop {
+				assertCoreError(t, err, KindUnexpected, "pagination_loop", 0)
+				failure := asError(t, err)
+				if failure.Message != "The API returned the same page cursor it was sent; stopping instead of repeating the page." {
+					t.Errorf("message = %q", failure.Message)
+				}
+				if page != nil {
+					t.Error("loop returned a page")
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if page.NextCursor != tc.next || len(page.Items) != 1 {
+					t.Errorf("page = %+v", page)
+				}
+			}
+			if api.requests() != 1 {
+				t.Errorf("requests = %d", api.requests())
+			}
+		})
+	}
+}
+
+func TestTranscriptRowsKeepTheirOwnRaw(t *testing.T) {
+	for _, unknown := range []string{`"x_future":{"nested":[1,null,{"k":"v"}]},`, ""} {
+		t.Run(unknown, func(t *testing.T) {
+			row := `{` + unknown + `"id":"tr_1","title":"T","duration_seconds":5,"created_at":1760000000,"tags":[],"deleted_at":1760000010,"cause":"manual","receipt":{"x_receipt":{"future":true}}}`
+			api := newListAPI(t, func(path string, _ url.Values) (int, string) {
+				if path == "/v1/transcripts/deleted" {
+					return 200, `{"deleted":[` + row + `],"next_cursor":null}`
+				}
+				return 200, `{"transcripts":[` + row + `],"next_cursor":null}`
+			})
+			c := api.client(t)
+			page, err := c.Transcripts.Page(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(page.Items) != 1 {
+				t.Fatalf("rows = %d", len(page.Items))
+			}
+			if got := nestedRaw(t, page.Items[0]); got != row {
+				t.Errorf("summary Raw = %s, want %s", got, row)
+			}
+			rows, err := drain(c.Transcripts.Deleted(context.Background()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 1 {
+				t.Fatalf("deleted rows = %d", len(rows))
+			}
+			if got := nestedRaw(t, rows[0]); got != row {
+				t.Errorf("deleted Raw = %s, want %s", got, row)
+			}
+		})
+	}
+}
+
+func TestListRowsComeFromTheExactKeyEachWithItsOwnRaw(t *testing.T) {
+	transcript := func(id, unknown string) string {
+		return `{"id":"` + id + `","title":"T","duration_seconds":5,"created_at":1760000000,"tags":[],` + unknown + `}`
+	}
+	deleted := func(id, unknown string) string {
+		return `{"id":"` + id + `","title":"T","duration_seconds":5,"created_at":1760000000,"deleted_at":1760000010,"cause":"manual",` + unknown + `}`
+	}
+	job := func(id string) string { return `{"id":"` + id + `","state":"done","created_at":1760000000}` }
+	a, b, c := transcript("tr_a", `"x_a":{"n":[1]}`), transcript("tr_b", `"x_b":"two","x_c":null`), transcript("tr_c", `"x_c":3`)
+	da, db, dc := deleted("tr_a", `"x_a":{"n":[1]}`), deleted("tr_b", `"x_b":"two","x_c":null`), deleted("tr_c", `"x_c":3`)
+	for _, tc := range []struct {
+		name                                string
+		transcripts, deletedBody            string
+		jobs                                string
+		wantRaw, wantDeletedRaw             []string
+		wantIDs, wantDeletedIDs, wantJobIDs []string
+	}{
+		{
+			name:        "rows with different unknown fields keep their own",
+			transcripts: `{"transcripts":[` + a + `,` + b + `,` + c + `],"next_cursor":null}`,
+			deletedBody: `{"deleted":[` + da + `,` + db + `,` + dc + `],"next_cursor":null}`,
+			jobs:        `{"jobs":[` + job("j1") + `,` + job("j2") + `],"next_cursor":null}`,
+			wantRaw:     []string{a, b, c}, wantDeletedRaw: []string{da, db, dc},
+			wantIDs: []string{"tr_a", "tr_b", "tr_c"}, wantDeletedIDs: []string{"tr_a", "tr_b", "tr_c"}, wantJobIDs: []string{"j1", "j2"},
+		},
+		{
+			name:        "a longer case variant of the key does not replace the rows that were checked",
+			transcripts: `{"transcripts":[` + a + `],"TRANSCRIPTS":[` + b + `,` + c + `],"next_cursor":null}`,
+			deletedBody: `{"deleted":[` + da + `],"DELETED":[` + db + `,` + dc + `],"next_cursor":null}`,
+			jobs:        `{"jobs":[` + job("j1") + `],"JOBS":[` + job("j2") + `,` + job("j3") + `],"next_cursor":null}`,
+			wantRaw:     []string{a}, wantDeletedRaw: []string{da},
+			wantIDs: []string{"tr_a"}, wantDeletedIDs: []string{"tr_a"}, wantJobIDs: []string{"j1"},
+		},
+		{
+			name:        "a shorter case variant does not replace them either",
+			transcripts: `{"transcripts":[` + a + `,` + b + `],"Transcripts":[` + c + `],"next_cursor":null}`,
+			deletedBody: `{"deleted":[` + da + `,` + db + `],"Deleted":[` + dc + `],"next_cursor":null}`,
+			jobs:        `{"jobs":[` + job("j1") + `,` + job("j2") + `],"Jobs":[` + job("j3") + `],"next_cursor":null}`,
+			wantRaw:     []string{a, b}, wantDeletedRaw: []string{da, db},
+			wantIDs: []string{"tr_a", "tr_b"}, wantDeletedIDs: []string{"tr_a", "tr_b"}, wantJobIDs: []string{"j1", "j2"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newListAPI(t, func(path string, _ url.Values) (int, string) {
+				switch path {
+				case "/v1/transcripts/deleted":
+					return 200, tc.deletedBody
+				case "/v1/jobs":
+					return 200, tc.jobs
+				}
+				return 200, tc.transcripts
+			})
+			client := api.client(t)
+			page, err := client.Transcripts.Page(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(page.Items) != len(tc.wantRaw) {
+				t.Fatalf("summaries = %d, want %d", len(page.Items), len(tc.wantRaw))
+			}
+			for i, item := range page.Items {
+				if item.ID != tc.wantIDs[i] || string(item.Raw) != tc.wantRaw[i] {
+					t.Errorf("summary %d = %s with Raw %s, want %s with Raw %s", i, item.ID, item.Raw, tc.wantIDs[i], tc.wantRaw[i])
+				}
+			}
+			rows, err := drain(client.Transcripts.Deleted(context.Background()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != len(tc.wantDeletedRaw) {
+				t.Fatalf("deleted = %d, want %d", len(rows), len(tc.wantDeletedRaw))
+			}
+			for i, row := range rows {
+				if row.ID != tc.wantDeletedIDs[i] || string(row.Raw) != tc.wantDeletedRaw[i] {
+					t.Errorf("deleted %d = %s with Raw %s, want %s with Raw %s", i, row.ID, row.Raw, tc.wantDeletedIDs[i], tc.wantDeletedRaw[i])
+				}
+			}
+			jobs, err := drain(client.Jobs.List(context.Background(), nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(jobs) != len(tc.wantJobIDs) {
+				t.Fatalf("jobs = %d, want %d", len(jobs), len(tc.wantJobIDs))
+			}
+			for i, listed := range jobs {
+				if listed.ID != tc.wantJobIDs[i] {
+					t.Errorf("job %d = %s, want %s", i, listed.ID, tc.wantJobIDs[i])
+				}
 			}
 		})
 	}

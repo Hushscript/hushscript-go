@@ -1,13 +1,13 @@
 package hushscript
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"time"
 )
 
-// UploadLimits are the caller's current upload admission limits. The fields are typed, so a key the
-// API adds to limits later is not kept here; Client.API returns the whole body.
+// UploadLimits are the caller's current upload admission limits.
 type UploadLimits struct {
 	// MaxDailySeconds is the daily transcription cap, in seconds.
 	MaxDailySeconds int
@@ -17,6 +17,8 @@ type UploadLimits struct {
 	ActiveJobs int
 	// UsedTodaySeconds is the billable seconds used today.
 	UsedTodaySeconds int
+	// Raw is the limits object as the API sent it, unknown fields included.
+	Raw json.RawMessage
 }
 
 // Account is the account: balance, limits, card and region (spec 6.3).
@@ -33,6 +35,8 @@ type Account struct {
 	Limits     UploadLimits
 	// PurchasesRemainingInWindow is set for agent accounts only; nil otherwise.
 	PurchasesRemainingInWindow *int
+	// Raw is the answer as the API sent it, unknown fields included.
+	Raw json.RawMessage
 }
 
 // Balance is what an account can spend.
@@ -48,21 +52,49 @@ type Balance struct {
 	ExpiresAt *time.Time
 	// PurchasesRemaining is set for agent accounts only; nil otherwise.
 	PurchasesRemaining *int
+	// Raw is the account answer it was read from as the API sent it, unknown fields included.
+	Raw json.RawMessage
 }
 
 type accountBody struct {
-	BalanceSeconds             int    `json:"balance_seconds"`
-	HeldSeconds                int    `json:"held_seconds"`
-	CreditsExpireAt            *int64 `json:"credits_expire_at"`
-	CardOnFile                 bool   `json:"card_on_file"`
-	DataRegion                 string `json:"data_region"`
-	PurchasesRemainingInWindow *int   `json:"purchases_remaining_in_window"`
-	Limits                     struct {
-		MaxDailySeconds  int `json:"max_daily_seconds"`
-		MaxActiveJobs    int `json:"max_active_jobs"`
-		ActiveJobs       int `json:"active_jobs"`
-		UsedTodaySeconds int `json:"used_today_seconds"`
-	} `json:"limits"`
+	BalanceSeconds             int        `json:"balance_seconds"`
+	HeldSeconds                int        `json:"held_seconds"`
+	CreditsExpireAt            *int64     `json:"credits_expire_at"`
+	CardOnFile                 bool       `json:"card_on_file"`
+	DataRegion                 string     `json:"data_region"`
+	PurchasesRemainingInWindow *int       `json:"purchases_remaining_in_window"`
+	Limits                     limitsBody `json:"limits"`
+	raw                        json.RawMessage
+}
+
+type limitsBody struct {
+	MaxDailySeconds  int `json:"max_daily_seconds"`
+	MaxActiveJobs    int `json:"max_active_jobs"`
+	ActiveJobs       int `json:"active_jobs"`
+	UsedTodaySeconds int `json:"used_today_seconds"`
+	raw              json.RawMessage
+}
+
+func (l *limitsBody) UnmarshalJSON(data []byte) error {
+	type fields limitsBody
+	return decodeKeepingRaw(data, (*fields)(l), &l.raw)
+}
+
+func (l limitsBody) limits() UploadLimits {
+	return UploadLimits{
+		MaxDailySeconds: l.MaxDailySeconds, MaxActiveJobs: l.MaxActiveJobs, ActiveJobs: l.ActiveJobs,
+		UsedTodaySeconds: l.UsedTodaySeconds, Raw: l.raw,
+	}
+}
+
+// decodeKeepingRaw decodes data into the typed fields and keeps the object's own bytes beside them, so
+// a key the API adds later stays reachable.
+func decodeKeepingRaw[T any](data []byte, into *T, raw *json.RawMessage) error {
+	if err := json.Unmarshal(data, into); err != nil {
+		return err
+	}
+	*raw = bytes.Clone(data)
+	return nil
 }
 
 func (a accountBody) expiry() *time.Time {
@@ -88,6 +120,7 @@ func (c *core) readAccount(ctx context.Context, required ...string) (accountBody
 	if json.Unmarshal(response.Body, &body) != nil {
 		return accountBody{}, c.badResponse(route, response.StatusCode())
 	}
+	body.raw = bytes.Clone(response.Body)
 	return body, nil
 }
 
@@ -98,7 +131,7 @@ func (c *core) balance(ctx context.Context) (*Balance, error) {
 	}
 	return &Balance{
 		Seconds: body.BalanceSeconds, Minutes: body.BalanceSeconds / 60, HeldSeconds: body.HeldSeconds,
-		ExpiresAt: body.expiry(), PurchasesRemaining: body.PurchasesRemainingInWindow,
+		ExpiresAt: body.expiry(), PurchasesRemaining: body.PurchasesRemainingInWindow, Raw: bytes.Clone(body.raw),
 	}, nil
 }
 
@@ -129,6 +162,6 @@ func (c Client) Account(ctx context.Context) (*Account, error) {
 	return &Account{
 		BalanceSeconds: body.BalanceSeconds, HeldSeconds: body.HeldSeconds, CreditsExpireAt: body.expiry(),
 		CardOnFile: body.CardOnFile, DataRegion: body.DataRegion, PurchasesRemainingInWindow: body.PurchasesRemainingInWindow,
-		Limits: UploadLimits(body.Limits),
+		Limits: body.Limits.limits(), Raw: body.raw,
 	}, nil
 }

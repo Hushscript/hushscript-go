@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -740,4 +741,113 @@ func TestAgentClaimIDsAreRejectedBeforeAnyRequest(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAgentResultsKeepTheirUnknownFieldsInRawButNotInTheirTextForms(t *testing.T) {
+	future := `"x_future":{"deeper":[1,null,"x"]}`
+	signup := `{"signup_id":"hsr1:eu:abc123","claim_secret":"cs_secret","checkout_url":"https://pay.example/c/1","amount":199,"currency":"usd","expires_at":1760001800,` + future + `}`
+	claim := `{"pat":"` + newTokenText + `","user_id":"u_1","scopes":["transcribe"],"balance_seconds":2700,` + future + `}`
+	rotate := `{"pat":"` + newTokenText + `","pat_id":"pat_2","scopes":["transcribe"],"expires_at":null,` + future + `}`
+	srv := newRouteServer(t, func(rec recorded, _ int) step {
+		switch rec.method + " " + rec.path {
+		case signupRoute:
+			return ok(signup)
+		case claimRoute:
+			return ok(claim)
+		case rotateRoute:
+			return ok(rotate)
+		}
+		return step{status: 404, body: jsonError("not_found", 4040)}
+	})
+	signedUp, err := AgentSignup(context.Background(), request(), tokenless(srv)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := AgentClaim(context.Background(), "sg_1", "cs_secret", tokenless(srv)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := newTestClient(t, srv.URL, newFakeClock(), WithToken(testToken)).Agent.RotateToken(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		result any
+		want   string
+		secret string
+	}{
+		{"signup", *signedUp, signup, "cs_secret"},
+		{"claim", *claimed, claim, newTokenText},
+		{"rotate", *rotated, rotate, newTokenText},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nestedRaw(t, tc.result); got != tc.want {
+				t.Errorf("Raw = %s, want %s", got, tc.want)
+			}
+			for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%d", "%x", "%q"} {
+				text := fmt.Sprintf(verb, tc.result)
+				for _, leak := range []string{tc.secret, hex.EncodeToString([]byte(tc.secret)), fmt.Sprintf("%d", []byte(tc.secret)), "x_future", fmt.Sprintf("%d", []byte(`"x_future"`))} {
+					if strings.Contains(text, leak) {
+						t.Errorf("%s shows %q: %s", verb, leak, text)
+					}
+				}
+			}
+		})
+	}
+}
+
+type echoedBodyError struct{ body string }
+
+func (e *echoedBodyError) Error() string { return "transport echoed " + e.body }
+
+func TestAClaimSecretEchoedByTheTransportOrTheAPIIsRedactedEverywhere(t *testing.T) {
+	const claimSecret = "cs_very_secret_value" //nolint:gosec // a made-up secret
+	t.Run("transport error", func(t *testing.T) {
+		transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			sent, _ := io.ReadAll(req.Body)
+			return nil, &echoedBodyError{body: string(sent)}
+		})
+		_, err := AgentClaim(context.Background(), "sg_1", claimSecret, WithBaseURL("http://127.0.0.1:1"), WithHTTPClient(&http.Client{Transport: transport}))
+		failure := wantCode(t, err, KindOutcomeUnknown, "outcome_unknown")
+		cause := failure.Unwrap()
+		if cause == nil {
+			t.Fatal("no cause")
+		}
+		for what, text := range map[string]string{
+			"Message": failure.Message, "Hint": failure.Hint, "Error()": failure.Error(), "cause": cause.Error(),
+			"%v": fmt.Sprintf("%v", failure), "%+v": fmt.Sprintf("%+v", failure), "%#v": fmt.Sprintf("%#v", failure),
+		} {
+			if strings.Contains(text, claimSecret) {
+				t.Errorf("%s shows the claim secret: %s", what, text)
+			}
+		}
+		if want := `Post "http://127.0.0.1:1/v1/agent/accounts/sg_1/claim": transport echoed {"claim_secret":"[redacted]"}`; cause.Error() != want {
+			t.Errorf("cause = %q, want %q", cause.Error(), want)
+		}
+		var echoed *echoedBodyError
+		if errors.As(err, &echoed) {
+			t.Errorf("errors.As handed out the transport's own error: %v", echoed)
+		}
+	})
+	t.Run("api error body", func(t *testing.T) {
+		srv := newRouteServer(t, func(recorded, int) step {
+			return step{status: 400, body: `{"error":"bad_request","code":4000,"detail":"you sent ` + claimSecret + `"}`}
+		})
+		_, err := AgentClaim(context.Background(), "sg_1", claimSecret, tokenless(srv)...)
+		failure := wantCode(t, err, KindValidation, "bad_request")
+		if strings.Contains(fmt.Sprint(failure.Details), claimSecret) || failure.Details["detail"] != "you sent [redacted]" {
+			t.Errorf("details = %v", failure.Details)
+		}
+	})
+	t.Run("a blank claim secret redacts nothing", func(t *testing.T) {
+		srv := newRouteServer(t, func(recorded, int) step { return step{status: 400, body: jsonError("bad_request", 4000)} })
+		_, err := AgentClaim(context.Background(), "sg_1", " ", tokenless(srv)...)
+		failure := wantCode(t, err, KindValidation, "bad_request")
+		_, err = AgentClaim(context.Background(), "sg_1", claimSecret, tokenless(srv)...)
+		want := wantCode(t, err, KindValidation, "bad_request")
+		if failure.Message != want.Message || failure.Hint != want.Hint || strings.Contains(failure.Message, redactedField) {
+			t.Errorf("blank secret: message %q hint %q, want message %q hint %q", failure.Message, failure.Hint, want.Message, want.Hint)
+		}
+	})
 }

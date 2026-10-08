@@ -111,7 +111,10 @@ type outcome struct {
 	// sent says whether the request may have reached the server. It is true unless the failure is
 	// provably in connection setup, which a custom transport cannot be trusted to report any other way.
 	sent bool
-	took time.Duration
+	// timedOut says the SDK's own per-attempt timeout ended the attempt, not the caller and not the
+	// caller's transport, which can return context.DeadlineExceeded on its own.
+	timedOut bool
+	took     time.Duration
 }
 
 // retryState counts what the upload-create rules and the generic budget have used.
@@ -147,7 +150,7 @@ func (d *doer) Do(req *http.Request) (*http.Response, error) {
 			if err := ctx.Err(); err != nil {
 				d.cfg.logAttempt(ctx, record)
 				if class == classNever && out.sent {
-					return nil, d.outcomeUnknown(req, err)
+					return nil, d.outcomeUnknown(req, err, "")
 				}
 				return nil, d.aborted(err)
 			}
@@ -281,7 +284,7 @@ func (d *doer) attempt(parent context.Context, req *http.Request, class retryCla
 			scrubSignedURLs(err)
 		}
 		unsent := handshakeFailed.Load() || (asked.Load() && !connected.Load()) || connectionSetupFailure(err)
-		return outcome{err: err, sent: !unsent, took: time.Since(started)}
+		return outcome{err: err, sent: !unsent, timedOut: ownTimeout(parent, ctx), took: time.Since(started)}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	// net/http keeps the request on the response, and the caller gets the response back. The request
@@ -297,11 +300,16 @@ func (d *doer) attempt(parent context.Context, req *http.Request, class retryCla
 		err = errResponseTooLarge
 	}
 	if err != nil {
-		return outcome{err: err, sent: true, took: time.Since(started)}
+		return outcome{err: err, sent: true, timedOut: ownTimeout(parent, ctx), took: time.Since(started)}
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	resp.ContentLength = int64(len(body))
 	return outcome{resp: resp, body: body, sent: true, took: time.Since(started)}
+}
+
+// ownTimeout reports whether the attempt's own timeout has fired while the caller's context is alive.
+func ownTimeout(parent, attempt context.Context) bool {
+	return parent.Err() == nil && errors.Is(attempt.Err(), context.DeadlineExceeded)
 }
 
 // emptyBody is a request body with no bytes in it that net/http does not recognize as http.NoBody.
@@ -384,22 +392,58 @@ func (d *doer) aborted(cause error) *Error {
 // request was sent and the operation mints a credential or an account, the outcome is unknown, not a
 // plain failure.
 func (d *doer) networkFailure(class retryClass, req *http.Request, out outcome) *Error {
-	if class == classNever && out.sent {
-		return d.outcomeUnknown(req, out.err)
+	detail := underlyingError(out.err)
+	if out.timedOut {
+		detail = "" // the SDK's own timeout is not a foreign error, so there is no type to name
 	}
-	message := "The request to the Hushscript API failed."
-	if errors.Is(out.err, context.DeadlineExceeded) {
+	if class == classNever && out.sent {
+		return d.outcomeUnknown(req, out.err, detail)
+	}
+	message := "The request to the Hushscript API failed. " + detail
+	if out.timedOut {
 		message = fmt.Sprintf("The request to the Hushscript API timed out after %s.", d.timeoutFor(req.Context()))
 	}
-	return newSDKError(KindNetwork, "network_error", message, out.err, d.cfg.redactor(), hintInputs{})
+	failure := newSDKError(KindNetwork, "network_error", message, out.err, d.cfg.redactor(), hintInputs{})
+	if !out.timedOut {
+		failure.causeText = "" // the message already carries the redacted text of the cause
+	}
+	return failure
+}
+
+// underlyingError names the error the transport returned: its Go type and its message. http.Client
+// wraps every RoundTripper error in a *url.Error, so the SDK cannot tell a transport failure from any
+// other error a caller's transport returns; naming the type is how the message stays honest about it.
+// The *url.Error itself is left out because its URL can carry a signature.
+func underlyingError(err error) string {
+	if errors.Is(err, errResponseTooLarge) {
+		return "The response is larger than the SDK reads into memory." // the SDK's own error, not a foreign type
+	}
+	inner := err
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		inner = urlErr.Err
+	}
+	if text := inner.Error(); text != "" {
+		return fmt.Sprintf("%T: %s", inner, text)
+	}
+	return fmt.Sprintf("%T", inner)
 }
 
 // outcomeUnknown is the error for a claim, rotate or signup whose request was sent and whose answer
 // never arrived (a network error, a timeout or a cancellation): the server may have acted. Claim and
 // rotate carry the hints of spec section 7.4; signup has none.
-func (d *doer) outcomeUnknown(req *http.Request, cause error) *Error {
-	failure := newSDKError(KindOutcomeUnknown, "outcome_unknown",
-		"The request was sent but no response arrived, so its outcome is unknown.", cause, d.cfg.redactor(), hintInputs{})
+//
+// detail names the foreign error that ended the attempt (underlyingError); it is "" when the SDK's own
+// timeout or the caller's cancellation did, which keep the fixed text.
+func (d *doer) outcomeUnknown(req *http.Request, cause error, detail string) *Error {
+	message := "The request was sent but no response arrived, so its outcome is unknown."
+	if detail != "" {
+		message += " " + detail
+	}
+	failure := newSDKError(KindOutcomeUnknown, "outcome_unknown", message, cause, d.cfg.redactor(), hintInputs{})
+	if detail != "" {
+		failure.causeText = "" // the message already carries the redacted text of the cause
+	}
 	switch path := req.URL.EscapedPath(); {
 	case strings.HasSuffix(path, "/claim"):
 		failure.Hint = claimOutcomeHint

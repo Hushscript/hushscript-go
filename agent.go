@@ -1,6 +1,7 @@
 package hushscript
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -48,6 +49,9 @@ type AgentSignupResult struct {
 	CheckoutURL string
 	Price       Money
 	ExpiresAt   time.Time
+	// Raw is the answer as the API sent it, unknown fields included. It holds the claim secret, so no
+	// text form of the result shows it.
+	Raw json.RawMessage
 }
 
 // AgentAccount is what AgentClaim returns.
@@ -58,6 +62,9 @@ type AgentAccount struct {
 	Scopes []string
 	// Balance is the pack just granted. A new account holds nothing and has no expiry in the answer.
 	Balance Balance
+	// Raw is the answer as the API sent it, unknown fields included. It holds the token, so no text form
+	// of the result shows it.
+	Raw json.RawMessage
 }
 
 // RotatedToken is what RotateToken returns.
@@ -68,6 +75,9 @@ type RotatedToken struct {
 	Scopes  []string
 	// ExpiresAt is nil when the token never expires.
 	ExpiresAt *time.Time
+	// Raw is the answer as the API sent it, unknown fields included. It holds the successor token, so no
+	// text form of the result shows it.
+	Raw json.RawMessage
 }
 
 // redactedField stands in for a secret field in every text form of a result.
@@ -76,7 +86,7 @@ const redactedField = "[redacted]"
 // String shows the result with ClaimSecret replaced by [redacted]; the field itself stays readable.
 func (r AgentSignupResult) String() string {
 	type plain AgentSignupResult // no methods, so printing it does not come back here
-	r.ClaimSecret = redactedField
+	r.ClaimSecret, r.Raw = redactedField, nil
 	return fmt.Sprintf("hushscript.AgentSignupResult%+v", plain(r))
 }
 
@@ -89,7 +99,7 @@ func (r AgentSignupResult) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f
 // String shows the account with Token replaced by [redacted]; the field itself stays readable.
 func (a AgentAccount) String() string {
 	type plain AgentAccount
-	a.Token = redactedField
+	a.Token, a.Raw = redactedField, nil
 	return fmt.Sprintf("hushscript.AgentAccount%+v", plain(a))
 }
 
@@ -102,7 +112,7 @@ func (a AgentAccount) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, a.S
 // String shows the rotation with Token replaced by [redacted]; the field itself stays readable.
 func (r RotatedToken) String() string {
 	type plain RotatedToken
-	r.Token = redactedField
+	r.Token, r.Raw = redactedField, nil
 	return fmt.Sprintf("hushscript.RotatedToken%+v", plain(r))
 }
 
@@ -145,6 +155,7 @@ type credentialAnswer struct {
 	Scopes         *[]string       `json:"scopes"`
 	BalanceSeconds *int            `json:"balance_seconds"`
 	ExpiresAt      json.RawMessage `json:"expires_at"`
+	raw            json.RawMessage
 }
 
 // maxUnixSeconds is the newest instant any SDK accepts as a timestamp, the span of a JavaScript Date
@@ -178,6 +189,7 @@ func (c *core) readCredential(resp *http.Response, required func(credentialAnswe
 	if json.Unmarshal(body, &loose) == nil {
 		seen, _ = loose["pat"].(string)
 	}
+	answer.raw = bytes.Clone(body)
 	if json.Unmarshal(body, &answer) != nil || answer.Pat == nil || !acceptableToken(*answer.Pat) || !required(answer) {
 		return answer, seen, false
 	}
@@ -224,7 +236,7 @@ func AgentSignup(ctx context.Context, req AgentSignupRequest, opts ...Option) (*
 	signup := parsed
 	return &AgentSignupResult{
 		SignupID: signup.SignupId, ClaimSecret: signup.ClaimSecret, CheckoutURL: signup.CheckoutUrl,
-		Price: newMoney(signup.Amount, signup.Currency), ExpiresAt: unixTime(int64(signup.ExpiresAt)),
+		Price: newMoney(signup.Amount, signup.Currency), ExpiresAt: unixTime(int64(signup.ExpiresAt)), Raw: bytes.Clone(response.Body),
 	}, nil
 }
 
@@ -238,6 +250,7 @@ func AgentClaim(ctx context.Context, signupID, claimSecret string, opts ...Optio
 	if err != nil {
 		return nil, err
 	}
+	cfg.secrets = []secret{newSecret(claimSecret)} // redacted from every error of this call, like the token
 	if idErr := checkID(cfg.redactor(), "The signup id", signupID); idErr != nil {
 		return nil, idErr
 	}
@@ -258,7 +271,7 @@ func AgentClaim(ctx context.Context, signupID, claimSecret string, opts ...Optio
 	}
 	return &AgentAccount{
 		Token: *answer.Pat, UserID: *answer.UserID, Scopes: *answer.Scopes,
-		Balance: Balance{Seconds: *answer.BalanceSeconds, Minutes: *answer.BalanceSeconds / secondsPerMinute},
+		Balance: Balance{Seconds: *answer.BalanceSeconds, Minutes: *answer.BalanceSeconds / secondsPerMinute}, Raw: answer.raw,
 	}, nil
 }
 
@@ -289,7 +302,7 @@ func (a AgentService) RotateToken(ctx context.Context) (*RotatedToken, error) {
 	if !ok {
 		return nil, core.lostCredential(rotateOp, resp.StatusCode, rotateOutcomeHint, seen)
 	}
-	out := &RotatedToken{Token: *answer.Pat, TokenID: *answer.PatID, Scopes: *answer.Scopes}
+	out := &RotatedToken{Token: *answer.Pat, TokenID: *answer.PatID, Scopes: *answer.Scopes, Raw: answer.raw}
 	out.ExpiresAt, _ = answer.expiry()
 	return out, nil
 }

@@ -1,9 +1,11 @@
 package hushscript
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -50,6 +52,7 @@ tool)
     esac ;;
   *go-mutesting*)
     echo "mutation-files $*"
+    if [ "$GATE_MODE" = mutation-hang ]; then exec sleep 30; fi
     case "$GATE_MODE" in
     mutation)
       for n in 1 2 3 4 5 6 7 8; do
@@ -82,7 +85,7 @@ func gateScript(t *testing.T, name string) (script, path string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return `bash "$1" "${2:-}"` + "\n", path
+	return `script="$1"; shift; bash "$script" "$@"` + "\n", path
 }
 
 func TestFuzzGateRejectsBuildErrorsAndZeroTargets(t *testing.T) {
@@ -124,6 +127,57 @@ func TestMutationGateIncludesTheTranscribePipelineAndKeepsTheFloor(t *testing.T)
 	}
 	if out, err = runGate(t, script, "mutation", path, "81"); err == nil {
 		t.Fatalf("score below floor passed: %s", out)
+	}
+}
+
+func TestMutationGateSelectsSourceFilesAndKeepsTheFloor(t *testing.T) {
+	script, path := gateScript(t, "mutation.sh")
+	for _, tc := range []struct {
+		name, floor string
+		files       []string
+		wantError   bool
+	}{
+		{"one-file", "75", []string{"http.go"}, false},
+		{"multiple-files", "75", []string{"upload.go", "retry.go"}, false},
+		{"floor-boundary", "80", []string{"http.go"}, false},
+		{"below-floor", "81", []string{"http.go"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{path, tc.floor}, tc.files...)
+			out, err := runGate(t, script, "mutation", args...)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("error = %v, wantError = %v, output = %s", err, tc.wantError, out)
+			}
+			want := "mutation-files tool -modfile=tools/go.mod go-mutesting --debug --exec-timeout=60 " + strings.Join(tc.files, " ") + "\n"
+			if strings.Count(out, want) != 1 {
+				t.Fatalf("want one invocation %q, got %s", want, out)
+			}
+		})
+	}
+	for _, files := range [][]string{{"http.go"}, {"upload.go", "retry.go"}} {
+		t.Run("zero-scored-"+strings.Join(files, "-"), func(t *testing.T) {
+			t.Setenv("MUTATION_OUTPUT", "")
+			args := append([]string{path, "75"}, files...)
+			out, err := runGate(t, script, "mutation-fixture", args...)
+			if err == nil || !strings.Contains(out, "mutation: no scored mutants") {
+				t.Fatalf("zero scored mutants: error = %v, output = %s", err, out)
+			}
+		})
+	}
+}
+
+func TestMutationGateRejectsUnknownSourceFiles(t *testing.T) {
+	script, path := gateScript(t, "mutation.sh")
+	for _, files := range [][]string{{"nope.go"}, {"http.go", "nope.go"}, {""}, {"http.go retry.go"}, {"HTTP.go"}, {"./http.go"}} {
+		t.Run(strings.Join(files, "|"), func(t *testing.T) {
+			out, err := runGate(t, script, "mutation", append([]string{path, "75"}, files...)...)
+			if err == nil {
+				t.Fatalf("accepted %q: %s", files, out)
+			}
+			if !strings.Contains(out, "mutation: unknown source file '") || strings.Contains(out, "mutation-files") {
+				t.Fatalf("output = %s", out)
+			}
+		})
 	}
 }
 
@@ -206,15 +260,22 @@ func TestGofumptGateRejectsFormatterFailureAndDirtyFiles(t *testing.T) {
 	for _, tc := range []struct {
 		mode      string
 		wantError bool
+		wantFiles string
 	}{
-		{"formatter-error", true},
-		{"unformatted", true},
-		{"formatted", false},
+		{"formatter-error", true, ""},
+		{"unformatted", true, "gofumpt: unformatted files:\ndirty.go\n"},
+		{"formatted", false, ""},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			out, err := runGate(t, script, tc.mode)
 			if (err != nil) != tc.wantError {
 				t.Fatalf("error = %v, output = %s", err, out)
+			}
+			if tc.wantFiles != "" && !strings.Contains(out, tc.wantFiles) {
+				t.Fatalf("the unformatted files are not printed: %s", out)
+			}
+			if tc.wantFiles == "" && strings.Contains(out, "dirty.go") {
+				t.Fatalf("a file is named although none is unformatted: %s", out)
 			}
 			if !tc.wantError && strings.Count(out, "lint-ran") != 1 {
 				t.Fatalf("lint did not run once: %s", out)
@@ -223,5 +284,261 @@ func TestGofumptGateRejectsFormatterFailureAndDirtyFiles(t *testing.T) {
 				t.Fatalf("lint ran after formatting failed: %s", out)
 			}
 		})
+	}
+}
+
+var shardNames = []string{"http.go", "retry.go", "pacing.go", "transcribe.go", "upload.go", "resume.go", "wait.go", "heartbeat.go"}
+
+func TestMutationShardWritesItsCountsAndFailsOnlyOnABrokenRun(t *testing.T) {
+	script, path := gateScript(t, "mutation.sh")
+	mutant := func(output, exit, status string) string {
+		return "Execute built-in exec command for mutation\n" + output + "\nExited with " + exit + "\n" + status + " \"/tmp/probe.go.1\" with checksum abc123\n"
+	}
+	killed := mutant("--- FAIL: TestProbe (0.00s)\nFAIL\nFAIL example.test/probe 0.001s", "0", "PASS")
+	survived := mutant("ok example.test/probe 0.001s", "1", "FAIL")
+	for _, tc := range []struct {
+		name, mode, output, want string
+		wantError                bool
+	}{
+		{"killed and survived", "mutation", "", "mutation-counts http.go 8 10\n", false},
+		{"every mutant survived", "mutation-fixture", survived + survived, "mutation-counts http.go 0 2\n", false},
+		{"no scored mutants", "mutation-fixture", "", "mutation-counts http.go 0 0\n", false},
+		{"one killed", "mutation-fixture", killed, "mutation-counts http.go 1 1\n", false},
+		{"output that cannot be read", "mutation-fixture", killed + "Execute built-in exec command for mutation\n--- FAIL: TestProbe (0.00s)\n", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MUTATION_OUTPUT", tc.output)
+			counts := filepath.Join(t.TempDir(), "http.go.counts")
+			gateFile(t, counts, "stale from an earlier run\n")
+			out, err := runGate(t, script, tc.mode, path, "--counts", counts, "http.go")
+			got, readErr := os.ReadFile(counts) //nolint:gosec // a path the test made
+			if tc.wantError {
+				if err == nil || !strings.Contains(out, "mutation: incomplete or unrecognized mutant output") || readErr == nil {
+					t.Fatalf("error = %v, counts read error = %v, output = %s", err, readErr, out)
+				}
+				return
+			}
+			if err != nil || readErr != nil || string(got) != tc.want {
+				t.Fatalf("error = %v, counts = %q (%v), want %q, output = %s", err, got, readErr, tc.want, out)
+			}
+		})
+	}
+}
+
+func TestMutationShardRefusesWhatItCannotRun(t *testing.T) {
+	script, path := gateScript(t, "mutation.sh")
+	counts := filepath.Join(t.TempDir(), "x.counts")
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no file", []string{"--counts", counts}, "--counts takes exactly one source file"},
+		{"two files", []string{"--counts", counts, "http.go", "retry.go"}, "--counts takes exactly one source file"},
+		{"unknown file", []string{"--counts", counts, "nope.go"}, "unknown source file 'nope.go'"},
+		{"no directory", []string{"--counts", filepath.Join(t.TempDir(), "missing", "x.counts"), "http.go"}, "does not exist"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := runGate(t, script, "mutation", append([]string{path}, tc.args...)...)
+			if err == nil || !strings.Contains(out, tc.want) || strings.Contains(out, "mutation-files") {
+				t.Fatalf("error = %v, want %q in output: %s", err, tc.want, out)
+			}
+		})
+	}
+}
+
+func TestMutationTimeoutNamesTheFileAndLeavesNoCounts(t *testing.T) {
+	script, path := gateScript(t, "mutation.sh")
+	t.Setenv("MUTATION_TIMEOUT", "1")
+	counts := filepath.Join(t.TempDir(), "http.go.counts")
+	out, err := runGate(t, script, "mutation-hang", path, "--counts", counts, "http.go")
+	if err == nil || !strings.Contains(out, "mutation: http.go timed out after 1s") {
+		t.Fatalf("shard: error = %v, output = %s", err, out)
+	}
+	if _, statErr := os.Stat(counts); statErr == nil {
+		t.Error("a timed-out shard left a counts file")
+	}
+	out, err = runGate(t, script, "mutation-hang", path, "75", "http.go", "retry.go")
+	if err == nil || !strings.Contains(out, "mutation: http.go retry.go timed out after 1s") {
+		t.Fatalf("floor run: error = %v, output = %s", err, out)
+	}
+}
+
+func TestMutationTimeoutMustBeWholeSeconds(t *testing.T) {
+	script, path := gateScript(t, "mutation.sh")
+	for _, limit := range []string{"0", "-5", "1.5", "abc", " 3", "03x"} {
+		t.Run(limit, func(t *testing.T) {
+			t.Setenv("MUTATION_TIMEOUT", limit)
+			out, err := runGate(t, script, "mutation", path, "75", "http.go")
+			if err == nil || !strings.Contains(out, fmt.Sprintf("mutation: MUTATION_TIMEOUT must be a whole number of seconds, got '%s'", limit)) || strings.Contains(out, "mutation-files") {
+				t.Fatalf("error = %v, output = %s", err, out)
+			}
+		})
+	}
+}
+
+func writeShards(t *testing.T, counts map[string]string) (dir string, paths []string) {
+	t.Helper()
+	dir = t.TempDir()
+	for _, name := range shardNames {
+		content, ok := counts[name]
+		if !ok {
+			continue
+		}
+		file := filepath.Join(dir, name+".counts")
+		gateFile(t, file, content)
+		paths = append(paths, file)
+	}
+	return dir, paths
+}
+
+func allShards(killed, scored int) map[string]string {
+	counts := map[string]string{}
+	for _, name := range shardNames {
+		counts[name] = fmt.Sprintf("mutation-counts %s %d %d\n", name, killed, scored)
+	}
+	return counts
+}
+
+func TestMutationSumKeepsTheAggregateFloor(t *testing.T) {
+	script, path := gateScript(t, "mutation.sh")
+	weakSmallFile := allShards(10, 10)
+	weakSmallFile["pacing.go"] = "mutation-counts pacing.go 0 3\n"
+	weakSmallFile["heartbeat.go"] = "mutation-counts heartbeat.go 0 0\n"
+	for _, tc := range []struct {
+		name, floor, want string
+		counts            map[string]string
+		wantError         bool
+	}{
+		{"at the floor", "70", "mutation score 70.0% (floor 70%) over 56 killed of 80 scored", allShards(7, 10), false},
+		{"below the floor", "71", "mutation score 70.0% (floor 71%) over 56 killed of 80 scored", allShards(7, 10), true},
+		{"one weak small file does not sink the total", "75", "mutation score 95.2% (floor 75%) over 60 killed of 63 scored", weakSmallFile, false},
+		{"a file with no scored mutants is fine", "75", "mutation counts heartbeat.go: 0 killed of 0 scored", weakSmallFile, false},
+		{"nothing scored at all", "75", "mutation: no scored mutants", allShards(0, 0), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, paths := writeShards(t, tc.counts)
+			out, err := runGate(t, script, "mutation", append([]string{path, "--sum", tc.floor}, paths...)...)
+			if (err != nil) != tc.wantError || !strings.Contains(out, tc.want) {
+				t.Fatalf("error = %v, want %q in output: %s", err, tc.want, out)
+			}
+		})
+	}
+}
+
+func TestMutationSumFailsLoudlyOnAMissingOrBrokenShard(t *testing.T) {
+	script, path := gateScript(t, "mutation.sh")
+	good := func() map[string]string { return allShards(8, 10) }
+	run := func(t *testing.T, counts map[string]string, extra ...string) (string, error) {
+		t.Helper()
+		_, paths := writeShards(t, counts)
+		return runGate(t, script, "mutation", append(append([]string{path, "--sum", "75"}, paths...), extra...)...)
+	}
+	t.Run("a shard artifact that never arrived", func(t *testing.T) {
+		counts := good()
+		delete(counts, "retry.go")
+		out, err := run(t, counts)
+		if err == nil || !strings.Contains(out, "mutation: no counts file for retry.go") || strings.Contains(out, "mutation score") {
+			t.Fatalf("error = %v, output = %s", err, out)
+		}
+	})
+	t.Run("a listed file that does not exist", func(t *testing.T) {
+		dir, paths := writeShards(t, good())
+		for _, p := range paths {
+			if strings.HasSuffix(p, "wait.go.counts") {
+				if err := os.Remove(p); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		out, err := runGate(t, script, "mutation", append([]string{path, "--sum", "75"}, paths...)...)
+		want := "mutation: counts file for wait.go is missing: " + filepath.Join(dir, "wait.go.counts")
+		if err == nil || !strings.Contains(out, want) {
+			t.Fatalf("error = %v, want %q in output: %s", err, want, out)
+		}
+	})
+	for name, content := range map[string]string{
+		"empty file":          "",
+		"garbage":             "killed everything\n",
+		"another file's name": "mutation-counts http.go 8 10\n",
+		"negative":            "mutation-counts upload.go -1 10\n",
+		"killed above scored": "mutation-counts upload.go 11 10\n",
+		"fractions":           "mutation-counts upload.go 1.5 10\n",
+		"missing scored":      "mutation-counts upload.go 8\n",
+		"extra field":         "mutation-counts upload.go 8 10 1\n",
+		"two lines":           "mutation-counts upload.go 8 10\nmutation-counts upload.go 8 10\n",
+		"wrong tag":           "counts upload.go 8 10\n",
+	} {
+		t.Run("malformed: "+name, func(t *testing.T) {
+			counts := good()
+			counts["upload.go"] = content
+			out, err := run(t, counts)
+			if err == nil || !strings.Contains(out, "mutation: malformed counts file for upload.go: ") || strings.Contains(out, "mutation score") {
+				t.Fatalf("error = %v, output = %s", err, out)
+			}
+		})
+	}
+	t.Run("a file that is not one of the shards", func(t *testing.T) {
+		other := filepath.Join(t.TempDir(), "other.go.counts")
+		gateFile(t, other, "mutation-counts other.go 1 1\n")
+		out, err := run(t, good(), other)
+		if err == nil || !strings.Contains(out, "mutation: unexpected counts file '"+other+"'") {
+			t.Fatalf("error = %v, output = %s", err, out)
+		}
+	})
+	t.Run("the same shard twice", func(t *testing.T) {
+		_, paths := writeShards(t, good())
+		again := filepath.Join(t.TempDir(), "http.go.counts")
+		gateFile(t, again, "mutation-counts http.go 8 10\n")
+		out, err := runGate(t, script, "mutation", append(append([]string{path, "--sum", "75"}, paths...), again)...)
+		if err == nil || !strings.Contains(out, "mutation: two counts files for http.go") {
+			t.Fatalf("error = %v, output = %s", err, out)
+		}
+	})
+	t.Run("an unmatched glob", func(t *testing.T) {
+		out, err := runGate(t, script, "mutation", path, "--sum", "75", "counts/*.counts")
+		if err == nil || !strings.Contains(out, "mutation: unexpected counts file 'counts/*.counts'") {
+			t.Fatalf("error = %v, output = %s", err, out)
+		}
+	})
+}
+
+func TestMutationFloorIsStoredOnceAndTheNightlyMatrixCoversEveryFile(t *testing.T) {
+	read := func(name string) string {
+		t.Helper()
+		raw, err := os.ReadFile(name) //nolint:gosec // fixed repository paths
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	justfile, compose, nightly, script := read("justfile"), read("compose.yaml"), read(".github/workflows/nightly.yml"), read("scripts/mutation.sh")
+	if strings.Count(justfile, "mutation_floor :=") != 1 {
+		t.Error("the justfile must define mutation_floor once")
+	}
+	_, mutation, ok := strings.Cut(compose, "\n  mutation:\n")
+	if !ok {
+		t.Fatal("compose has no mutation service")
+	}
+	mutation, _, _ = strings.Cut(mutation, "\n  fuzz:\n")
+	if strings.Contains(mutation, "mutation.sh") || regexp.MustCompile(`\b75\b`).MatchString(mutation) {
+		t.Errorf("the compose mutation service must not carry a command or a floor:\n%s", mutation)
+	}
+	if regexp.MustCompile(`\b75\b`).MatchString(nightly) {
+		t.Error("the nightly workflow must not carry the floor")
+	}
+	declared := regexp.MustCompile(`(?m)^known=\((.*)\)$`).FindStringSubmatch(script)
+	if declared == nil {
+		t.Fatal("mutation.sh declares no known files")
+	}
+	var matrix []string
+	for _, match := range regexp.MustCompile(`\{file: ([a-z]+\.go),`).FindAllStringSubmatch(nightly, -1) {
+		matrix = append(matrix, match[1])
+	}
+	if got, want := strings.Join(matrix, " "), declared[1]; got != want {
+		t.Errorf("the nightly matrix runs %q, mutation.sh knows %q", got, want)
+	}
+	if got := strings.Join(shardNames, " "); got != declared[1] {
+		t.Errorf("shardNames = %q, mutation.sh knows %q", got, declared[1])
 	}
 }

@@ -32,7 +32,7 @@ func (c *core) readJob(ctx context.Context, id string) (*Job, error) {
 	if json.Unmarshal(response.Body, &body) != nil || (body.TranscriptID != nil && !safeSegment(*body.TranscriptID)) {
 		return nil, c.badResponse(route, response.StatusCode())
 	}
-	return body.job(), nil
+	return body.job(bytes.Clone(response.Body)), nil
 }
 
 // badResponse is the error for a 2xx answer the SDK cannot use: an ApiError with the status the API
@@ -98,6 +98,31 @@ func rowsHave(body []byte, key string, fields ...string) bool {
 		}
 	}
 	return true
+}
+
+// listRows is the rows of a list answer and its next cursor, read from the exact keys rowsHave checked:
+// the generated decoder matches keys without regard to case, so a second spelling of the key could
+// hand it other rows than the ones that were checked. Each row is decoded on its own and keeps its own
+// bytes. ok is false for a row or cursor that does not decode.
+func listRows[T any](body []byte, key string) (rows []T, raws []json.RawMessage, cursor string, ok bool) {
+	var root map[string]json.RawMessage
+	var found []json.RawMessage
+	if json.Unmarshal(body, &root) != nil || json.Unmarshal(root[key], &found) != nil {
+		return nil, nil, "", false
+	}
+	if next := bytes.TrimSpace(root["next_cursor"]); len(next) > 0 && string(next) != "null" {
+		if json.Unmarshal(next, &cursor) != nil {
+			return nil, nil, "", false
+		}
+	}
+	rows, raws = make([]T, len(found)), make([]json.RawMessage, len(found))
+	for i, row := range found {
+		if json.Unmarshal(row, &rows[i]) != nil {
+			return nil, nil, "", false
+		}
+		raws[i] = bytes.Clone(row)
+	}
+	return rows, raws, cursor, true
 }
 
 // hasFields reports whether body is a JSON object holding every path, none of them null.

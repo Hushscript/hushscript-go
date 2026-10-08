@@ -1,7 +1,9 @@
 package hushscript
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"iter"
 	"time"
 
@@ -21,6 +23,8 @@ type Pack struct {
 	BonusMinutes int
 	// Available is false only for an agent account's tier-locked pack.
 	Available bool
+	// Raw is the pack as the API sent it, unknown fields included.
+	Raw json.RawMessage
 }
 
 // Card is a saved payment method.
@@ -37,6 +41,8 @@ type Card struct {
 	IsDefault bool
 	// FastCheckoutEligible says whether Buy may charge it without the buyer present.
 	FastCheckoutEligible bool
+	// Raw is the method as the API sent it, unknown fields included.
+	Raw json.RawMessage
 }
 
 // Cards is the saved payment methods and which one is the default.
@@ -44,6 +50,8 @@ type Cards struct {
 	// DefaultID is "" when there is no default card.
 	DefaultID string
 	Cards     []Card
+	// Raw is the answer as the API sent it, unknown fields included.
+	Raw json.RawMessage
 }
 
 // Purchase is what a purchase left the account with, read from the purchase answer alone.
@@ -52,6 +60,8 @@ type Purchase struct {
 	Seconds int
 	// Minutes is Seconds / 60, rounded toward zero.
 	Minutes int
+	// Raw is the purchase answer as the API sent it, unknown fields included.
+	Raw json.RawMessage
 }
 
 // BuyOptions are the options of Buy. The zero value buys with a fresh idempotency key and does not
@@ -80,6 +90,8 @@ type Transaction struct {
 	// ReceiptNumber is the public receipt reference; "" when there is none.
 	ReceiptNumber string
 	InitiatedVia  string
+	// Raw is the row as the API sent it, unknown fields included.
+	Raw json.RawMessage
 }
 
 // LedgerEntry is one movement of the credit balance.
@@ -91,6 +103,8 @@ type LedgerEntry struct {
 	JobID     string
 	Note      string
 	CreatedAt time.Time
+	// Raw is the entry as the API sent it, unknown fields included.
+	Raw json.RawMessage
 }
 
 // Hold is seconds reserved by work still running; they are already deducted from the balance.
@@ -100,6 +114,8 @@ type Hold struct {
 	Kind      string
 	Seconds   int
 	CreatedAt time.Time
+	// Raw is the row as the API sent it, unknown fields included.
+	Raw json.RawMessage
 }
 
 // BillingService is the friendly layer over the billing endpoints: Client.Billing.
@@ -127,11 +143,15 @@ func (b BillingService) Packs(ctx context.Context) ([]Pack, error) {
 	if !rowsHave(response.Body, "packs", "id", "seconds", "amount", "currency", "referral_bonus_seconds") {
 		return nil, core.badResponse(route, response.StatusCode())
 	}
-	packs := make([]Pack, len(parsed.Packs))
-	for i, raw := range parsed.Packs {
+	rows, raws, _, ok := listRows[generated.Pack](response.Body, "packs")
+	if !ok {
+		return nil, core.badResponse(route, response.StatusCode())
+	}
+	packs := make([]Pack, len(rows))
+	for i, raw := range rows {
 		packs[i] = Pack{
 			ID: raw.Id, Seconds: raw.Seconds, Minutes: raw.Seconds / secondsPerMinute, Price: newMoney(raw.Amount, raw.Currency),
-			BonusMinutes: raw.ReferralBonusSeconds / secondsPerMinute, Available: raw.Available == nil || *raw.Available,
+			BonusMinutes: raw.ReferralBonusSeconds / secondsPerMinute, Available: raw.Available == nil || *raw.Available, Raw: raws[i],
 		}
 	}
 	return packs, nil
@@ -150,11 +170,15 @@ func (c *core) savedCards(ctx context.Context) (*Cards, error) {
 	if !rowsHave(response.Body, "methods", "id", "type", "brand", "last4", "exp_month", "exp_year", "is_default", "fast_checkout_eligible") {
 		return nil, c.badResponse(route, response.StatusCode())
 	}
-	cards := &Cards{DefaultID: valueOf(parsed.DefaultId), Cards: make([]Card, len(parsed.Methods))}
-	for i, raw := range parsed.Methods {
+	rows, raws, _, ok := listRows[generated.Card](response.Body, "methods")
+	if !ok {
+		return nil, c.badResponse(route, response.StatusCode())
+	}
+	cards := &Cards{DefaultID: valueOf(parsed.DefaultId), Cards: make([]Card, len(rows)), Raw: bytes.Clone(response.Body)}
+	for i, raw := range rows {
 		cards.Cards[i] = Card{
 			ID: raw.Id, Type: raw.Type, Brand: raw.Brand, Last4: raw.Last4, ExpMonth: raw.ExpMonth, ExpYear: raw.ExpYear,
-			Email: valueOf(raw.Email), IsDefault: raw.IsDefault, FastCheckoutEligible: raw.FastCheckoutEligible,
+			Email: valueOf(raw.Email), IsDefault: raw.IsDefault, FastCheckoutEligible: raw.FastCheckoutEligible, Raw: raws[i],
 		}
 	}
 	return cards, nil
@@ -227,8 +251,8 @@ func (c *core) chooseCard(cards *Cards) (string, *Error) {
 		return cards.DefaultID, nil
 	}
 	var eligible []string
-	for _, card := range cards.Cards {
-		if card.FastCheckoutEligible {
+	for i := range cards.Cards {
+		if card := &cards.Cards[i]; card.FastCheckoutEligible {
 			eligible = append(eligible, card.ID)
 		}
 	}
@@ -294,7 +318,7 @@ func (c *core) purchase(ctx context.Context, body generated.BuyMinutesJSONReques
 		return nil, c.badResponse(buyRoute, response.StatusCode())
 	}
 	seconds := parsed.BalanceSeconds
-	return &Purchase{Seconds: seconds, Minutes: seconds / secondsPerMinute}, nil
+	return &Purchase{Seconds: seconds, Minutes: seconds / secondsPerMinute, Raw: bytes.Clone(response.Body)}, nil
 }
 
 // Buy buys a pack; it is Billing.Buy.
@@ -325,14 +349,17 @@ func (b BillingService) Transactions(ctx context.Context) iter.Seq2[Transaction,
 		if !rowsHave(response.Body, "transactions", "id", "seconds", "amount_cents", "amount_refunded_cents", "currency", "status", "created_at") {
 			return Page[Transaction]{}, core.badResponse(route, response.StatusCode())
 		}
-		list := parsed
-		page := Page[Transaction]{NextCursor: valueOf(list.NextCursor), Items: make([]Transaction, len(list.Transactions))}
-		for i, row := range list.Transactions {
+		rows, raws, cursor, ok := listRows[generated.Transaction](response.Body, "transactions")
+		if !ok {
+			return Page[Transaction]{}, core.badResponse(route, response.StatusCode())
+		}
+		page := Page[Transaction]{NextCursor: cursor, Items: make([]Transaction, len(rows))}
+		for i, row := range rows {
 			page.Items[i] = Transaction{
 				ID: row.Id, Seconds: row.Seconds, AmountCents: row.AmountCents, AmountRefundedCents: row.AmountRefundedCents,
 				Currency: row.Currency, Status: row.Status, CreatedAt: unixTime(int64(row.CreatedAt)),
 				PaymentMethodType: valueOf(row.PaymentMethodType), PaymentMethodBrand: valueOf(row.PaymentMethodBrand),
-				PaymentMethodLast4: valueOf(row.PaymentMethodLast4), ReceiptNumber: valueOf(row.ReceiptNumber), InitiatedVia: valueOf(row.InitiatedVia),
+				PaymentMethodLast4: valueOf(row.PaymentMethodLast4), ReceiptNumber: valueOf(row.ReceiptNumber), InitiatedVia: valueOf(row.InitiatedVia), Raw: raws[i],
 			}
 		}
 		return page, nil
@@ -363,12 +390,15 @@ func (b BillingService) Ledger(ctx context.Context) iter.Seq2[LedgerEntry, error
 		if !rowsHave(response.Body, "entries", "id", "delta_seconds", "kind", "created_at") {
 			return Page[LedgerEntry]{}, core.badResponse(route, response.StatusCode())
 		}
-		list := parsed
-		page := Page[LedgerEntry]{NextCursor: valueOf(list.NextCursor), Items: make([]LedgerEntry, len(list.Entries))}
-		for i, row := range list.Entries {
+		rows, raws, cursor, ok := listRows[generated.CreditLedgerEntry](response.Body, "entries")
+		if !ok {
+			return Page[LedgerEntry]{}, core.badResponse(route, response.StatusCode())
+		}
+		page := Page[LedgerEntry]{NextCursor: cursor, Items: make([]LedgerEntry, len(rows))}
+		for i, row := range rows {
 			page.Items[i] = LedgerEntry{
 				ID: row.Id, DeltaSeconds: row.DeltaSeconds, Kind: row.Kind, JobID: valueOf(row.JobId), Note: valueOf(row.Note),
-				CreatedAt: unixTime(int64(row.CreatedAt)),
+				CreatedAt: unixTime(int64(row.CreatedAt)), Raw: raws[i],
 			}
 		}
 		return page, nil
@@ -398,10 +428,13 @@ func (b BillingService) Holds(ctx context.Context) iter.Seq2[Hold, error] {
 		if !rowsHave(response.Body, "holds", "id", "kind", "seconds", "created_at") {
 			return Page[Hold]{}, core.badResponse(route, response.StatusCode())
 		}
-		list := parsed
-		page := Page[Hold]{NextCursor: valueOf(list.NextCursor), Items: make([]Hold, len(list.Holds))}
-		for i, row := range list.Holds {
-			page.Items[i] = Hold{ID: row.Id, Kind: string(row.Kind), Seconds: row.Seconds, CreatedAt: unixTime(int64(row.CreatedAt))}
+		rows, raws, cursor, ok := listRows[generated.ActiveHold](response.Body, "holds")
+		if !ok {
+			return Page[Hold]{}, core.badResponse(route, response.StatusCode())
+		}
+		page := Page[Hold]{NextCursor: cursor, Items: make([]Hold, len(rows))}
+		for i, row := range rows {
+			page.Items[i] = Hold{ID: row.Id, Kind: string(row.Kind), Seconds: row.Seconds, CreatedAt: unixTime(int64(row.CreatedAt)), Raw: raws[i]}
 		}
 		return page, nil
 	})

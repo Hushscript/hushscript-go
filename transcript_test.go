@@ -56,8 +56,16 @@ func TestATranscriptKeepsEveryFieldOfTheBodyAndTheBodyItself(t *testing.T) {
 		{Speaker: "B", SpeakerName: "Speaker B", StartMs: 900, EndMs: 1800, Text: "yo"},
 		{Speaker: "", SpeakerName: "", StartMs: 1800, EndMs: 2000, Text: "x"},
 	}
-	if fmt.Sprint(tr.Utterances) != fmt.Sprint(want) {
-		t.Errorf("utterances = %v, want %v", tr.Utterances, want)
+	withoutRaw := make([]Utterance, len(tr.Utterances))
+	for i, u := range tr.Utterances {
+		if len(u.Raw) == 0 {
+			t.Errorf("utterance %d has no Raw", i)
+		}
+		u.Raw = nil
+		withoutRaw[i] = u
+	}
+	if fmt.Sprint(withoutRaw) != fmt.Sprint(want) {
+		t.Errorf("utterances = %v, want %v", withoutRaw, want)
 	}
 	if got := strings.Join(tr.Languages, ","); got != "fr,de" {
 		t.Errorf("Languages = %q, want the API's order without cleaned", got)
@@ -341,5 +349,33 @@ func TestTranscriptTimestampNumbersRespectIntegerBoundsAndFloorFractions(t *test
 				})
 			}
 		}
+	}
+}
+
+func TestNestedUtterancesKeepTheirOwnRawInEveryLanguage(t *testing.T) {
+	for _, unknown := range []string{`null`, `""`, `"   "`, `"\t"`, `"\u2003"`, `false`, `0`, `[]`, `{"deeper":[1,null,"x"]}`} {
+		t.Run(unknown, func(t *testing.T) {
+			utterance := `{"speaker":"A","start_ms":0.9,"end_ms":10,"text":"hi","future":` + unknown + `}`
+			data := []byte(`{"id":"tr_1","created_at":1,"speaker_names":{"A":"Ann"},"body":{"original":{"utterances":[` + utterance + `]},"translations":{"fr":{"utterances":[` + utterance + `]},"cleaned":{"utterances":[` + utterance + `]}}}}`)
+			var transcript Transcript
+			if err := json.Unmarshal(data, &transcript); err != nil {
+				t.Fatal(err)
+			}
+			for i := range data {
+				data[i] = ' '
+			}
+			for _, language := range []string{"original", "fr", "cleaned"} {
+				items := transcript.UtterancesFor(language)
+				if len(items) != 1 {
+					t.Fatalf("%s utterances = %v", language, items)
+				}
+				if items[0].SpeakerName != "Ann" || items[0].StartMs != 0 || items[0].EndMs != 10 || items[0].Text != "hi" {
+					t.Fatalf("%s utterance = %+v", language, items[0])
+				}
+				if raw := nestedRaw(t, items[0]); raw != utterance {
+					t.Errorf("%s Raw = %s, want %s", language, raw, utterance)
+				}
+			}
+		})
 	}
 }

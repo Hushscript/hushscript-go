@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -1444,4 +1445,131 @@ func TestAZeroClientRefusesToTranscribe(t *testing.T) {
 	} {
 		_ = wantCode(t, err, KindConfiguration, "config_invalid")
 	}
+}
+
+func TestNetworkFailureNamesUnderlyingErrorAndRedactsToken(t *testing.T) {
+	const failed = "The request to the Hushscript API failed. "
+	for _, tc := range []struct {
+		name      string
+		cause     error
+		message   string
+		wantCause string
+	}{
+		{"transport", errors.New("transport exploded"), failed + "*errors.errorString: transport exploded", "transport exploded"},
+		{"empty", errors.New(""), failed + "*errors.errorString", ""},
+		{"token", errors.New("header " + testToken), failed + "*errors.errorString: header hsr…[redacted]", "header hsr…[redacted]"},
+		{
+			"secret tail", errors.New("echo " + strings.Split(testToken, ".")[2]),
+			failed + "*errors.errorString: echo hsr…[redacted]", "echo hsr…[redacted]",
+		},
+		{
+			"dns", &net.DNSError{Err: "no such host", Name: "example.test"},
+			failed + "*net.DNSError: lookup example.test: no such host", "lookup example.test: no such host",
+		},
+		{
+			"signed url", errors.New("put https://r2.example.com/b/k?X-Amz-Signature=abc123&X-Amz-Credential=zzz failed"),
+			failed + "*errors.errorString: put https://r2.example.com/b/k?[redacted] failed", "put https://r2.example.com/b/k?[redacted] failed",
+		},
+		{
+			"a deadline the transport returned itself", context.DeadlineExceeded,
+			failed + "context.deadlineExceededError: context deadline exceeded", "context deadline exceeded",
+		},
+		{
+			"the SDK's own size limit", errResponseTooLarge,
+			failed + "The response is larger than the SDK reads into memory.", "the response is larger than the SDK reads into memory",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := New(WithToken(testToken), WithBaseURL("https://api.example.test"), WithMaxRetries(0), WithHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, tc.cause })}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = c.Transcripts.Page(context.Background(), nil)
+			assertCoreError(t, err, KindNetwork, "network_error", 0)
+			failure := asError(t, err)
+			if failure.Message != tc.message {
+				t.Errorf("message = %q, want %q", failure.Message, tc.message)
+			}
+			if want := "hushscript: network_error: " + tc.message; failure.Error() != want {
+				t.Errorf("error = %q, want %q", failure.Error(), want)
+			}
+			wantCause := `Get "https://api.example.test/v1/transcripts": ` + tc.wantCause
+			if got := failure.Unwrap().Error(); got != wantCause {
+				t.Errorf("cause = %q, want %q", got, wantCause)
+			}
+			if !errors.Is(failure, tc.cause) {
+				t.Error("original cause identity lost")
+			}
+			for _, verb := range []string{"%v", "%+v", "%#v"} {
+				text := fmt.Sprintf(verb, failure)
+				for _, leak := range []string{testToken, testSecret, "abc123", "X-Amz-Signature"} {
+					if strings.Contains(text, leak) {
+						t.Errorf("%s shows %q: %s", verb, leak, text)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestOnlyTheSDKsOwnTimeoutIsReportedAsTimedOut(t *testing.T) {
+	blocked := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+	c, err := New(WithToken(testToken), WithBaseURL("https://api.example.test"), WithMaxRetries(0), WithTimeout(30*time.Millisecond), WithHTTPClient(&http.Client{Transport: blocked}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Transcripts.Page(context.Background(), nil)
+	failure := wantCoreError(t, err, KindNetwork, "network_error", 0)
+	const want = "The request to the Hushscript API timed out after 30ms."
+	if failure.Message != want || failure.Error() != "hushscript: network_error: "+want+" (cause: Get: context deadline exceeded)" {
+		t.Errorf("message = %q, error = %q", failure.Message, failure.Error())
+	}
+}
+
+func TestOutcomeUnknownNamesAForeignErrorAndKeepsTheFixedTextForOurOwn(t *testing.T) {
+	const base = "The request was sent but no response arrived, so its outcome is unknown."
+	signed := "https://r2.example.com/b/k?X-Amz-Signature=abc123"
+	for _, tc := range []struct {
+		name    string
+		cause   error
+		message string
+		errText string
+	}{
+		{
+			"foreign", errors.New("boom " + signed + " " + testToken),
+			base + " *errors.errorString: boom https://r2.example.com/b/k?[redacted] hsr…[redacted]",
+			"hushscript: outcome_unknown: " + base + " *errors.errorString: boom https://r2.example.com/b/k?[redacted] hsr…[redacted]",
+		},
+		{
+			"the SDK's own size limit", errResponseTooLarge,
+			base + " The response is larger than the SDK reads into memory.",
+			"hushscript: outcome_unknown: " + base + " The response is larger than the SDK reads into memory.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, tc.cause })
+			_, err := AgentSignup(context.Background(), request(), WithBaseURL("https://api.example.test"), WithHTTPClient(&http.Client{Transport: transport}))
+			failure := wantCode(t, err, KindOutcomeUnknown, "outcome_unknown")
+			if failure.Message != tc.message || failure.Error() != tc.errText {
+				t.Errorf("message = %q, error = %q", failure.Message, failure.Error())
+			}
+			if !errors.Is(failure, tc.cause) || strings.Contains(failure.Unwrap().Error(), "abc123") {
+				t.Errorf("cause = %v", failure.Unwrap())
+			}
+		})
+	}
+	t.Run("the SDK's own timeout", func(t *testing.T) {
+		blocked := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		})
+		_, err := AgentSignup(context.Background(), request(), WithBaseURL("https://api.example.test"), WithTimeout(30*time.Millisecond), WithHTTPClient(&http.Client{Transport: blocked}))
+		failure := wantCode(t, err, KindOutcomeUnknown, "outcome_unknown")
+		if want := "hushscript: outcome_unknown: " + base + " (cause: Post: context deadline exceeded)"; failure.Message != base || failure.Error() != want {
+			t.Errorf("message = %q, error = %q, want %q", failure.Message, failure.Error(), want)
+		}
+	})
 }

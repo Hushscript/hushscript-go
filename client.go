@@ -117,10 +117,19 @@ func (c *Client) LogValue() slog.Value {
 	return slog.StringValue(c.String())
 }
 
+var goVersionPattern = regexp.MustCompile(`go\d+\.\d+(?:\.\d+)?`)
+
 // userAgent is "hushscript-go/<version> go/<go version>" (spec section 3).
-func userAgent() string {
-	version := regexp.MustCompile(`go\d+\.\d+(?:\.\d+)?`).FindString(runtime.Version())
-	return fmt.Sprintf("hushscript-go/%s go/%s", sdkVersion(), strings.TrimPrefix(version, "go"))
+func userAgent() string { return userAgentForVersion(runtime.Version()) }
+
+// userAgentForVersion takes the runtime version as an argument so a test can pass any toolchain's. A
+// toolchain without a numeric version (a development build) reports "devel".
+func userAgentForVersion(runtimeVersion string) string {
+	version := strings.TrimPrefix(goVersionPattern.FindString(runtimeVersion), "go")
+	if version == "" {
+		version = "devel"
+	}
+	return fmt.Sprintf("hushscript-go/%s go/%s", sdkVersion(), version)
 }
 
 // sdkVersion is the module version the consumer's build resolved, which release-please tags set.
