@@ -19,7 +19,7 @@ var tokenPattern = regexp.MustCompile(`hsr\d+:[a-z]+:pat\.[0-9a-f]+\.[0-9a-f]+`)
 var urlQuery = regexp.MustCompile(`(https?://[^\s"'<>?#]+)\?[^\s"'<>#]*`)
 
 // redactedQuery replaces a URL's query in text.
-const redactedQuery = "…[redacted]"
+const redactedQuery = "[redacted]"
 
 // redactor removes the client's token, and anything shaped like a token, from text.
 type redactor struct {

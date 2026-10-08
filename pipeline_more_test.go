@@ -135,9 +135,9 @@ func TestAFLACBehindAnID3TagIsRecognizedAndProbed(t *testing.T) {
 func TestARedactorHidesTheQueryOfAnyURLInText(t *testing.T) {
 	r := newRedactor(testToken)
 	in := `Put "https://r2.example.com/bucket/key?X-Amz-Signature=abcdef&X-Amz-Credential=zzz": dial tcp 1.2.3.4:443: connection refused; also http://127.0.0.1:4010/__r2/j/3?X-Amz-Signature=q`
-	got := r.apply(in)
-	if strings.Contains(got, "abcdef") || strings.Contains(got, "zzz") || strings.Contains(got, "=q") || !strings.Contains(got, "https://r2.example.com/bucket/key?…[redacted]") {
-		t.Errorf("apply = %q", got)
+	want := `Put "https://r2.example.com/bucket/key?[redacted]": dial tcp 1.2.3.4:443: connection refused; also http://127.0.0.1:4010/__r2/j/3?[redacted]`
+	if got := r.apply(in); got != want {
+		t.Errorf("apply = %q, want %q", got, want)
 	}
 	if plain := "GET https://api.example.com/v1/jobs failed"; r.apply(plain) != plain {
 		t.Errorf("a URL without a query changed: %q", r.apply(plain))
