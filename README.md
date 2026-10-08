@@ -378,10 +378,13 @@ ffmpeg -i input -vn -c:a libopus output.opus
 | `WithHTTPClient` | none                  | a plain `http.Client` that never follows redirects                           |
 | `WithClock`      | none                  | the system clock; pass a `Clock` in tests                                    |
 
-An explicit option beats its environment variable. The base URL must be `https://`, or `http://` to
-`localhost`, `127.0.0.1` or `[::1]`, with no path. Each upload part has its own 300 s timeout, which
-you cannot change. `WithHTTPClient` takes a shallow copy of the `*http.Client` at `New`, so
-reassigning its fields afterwards does not reach the SDK.
+An explicit option beats its environment variable. A token, base URL or log level that is empty or
+only whitespace, as an option or in its environment variable, counts as not set: the option falls
+back to the environment variable, then to the default, and a missing token is a configuration
+error. The base URL must be `https://`, or `http://` to `localhost`, `127.0.0.1` or `[::1]`, with
+no path. Each upload part has its own 300 s timeout, which you cannot change. `WithHTTPClient`
+takes a shallow copy of the `*http.Client` at `New`, so reassigning its fields afterwards does not
+reach the SDK.
 
 ## Privacy
 

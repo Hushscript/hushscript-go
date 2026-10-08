@@ -108,7 +108,7 @@ func TestAcceptsOnlyHTTPSOrLoopbackHTTPBaseURLs(t *testing.T) {
 		}
 	}
 	bad := []string{
-		"http://api.hushscript.com", "ftp://127.0.0.1", "api.hushscript.com", "", "http://", "https://", "://x", "http://127.0.0.1.evil.test",
+		"http://api.hushscript.com", "ftp://127.0.0.1", "api.hushscript.com", "http://", "https://", "://x", "http://127.0.0.1.evil.test",
 		"https://api.hushscript.com/v1", "https://api.hushscript.com?x=1", "https://api.hushscript.com#frag", "https://u:p@api.hushscript.com",
 	}
 	for _, base := range bad {
@@ -277,12 +277,120 @@ func TestRejectsATokenWithCharactersOutsidePrintableASCIIWithoutEchoingIt(t *tes
 	}
 }
 
-func TestEmptyAndWhitespaceTokensAreConfigurationErrors(t *testing.T) {
+func TestMissingAndInvalidTokensAreConfigurationErrors(t *testing.T) {
 	t.Setenv("HUSHSCRIPT_TOKEN", "")
 	for _, token := range []string{"", " ", "\t", "hsré"} {
 		t.Run(fmt.Sprintf("%q", token), func(t *testing.T) {
 			_, err := New(WithToken(token))
 			assertCoreError(t, err, KindConfiguration, "config_invalid", 0)
+		})
+	}
+}
+
+func TestBlankStringOptionsFallBack(t *testing.T) {
+	for _, blank := range []string{"", "   ", "\t", "\n\r", "\u2003\u00a0"} {
+		t.Run(fmt.Sprintf("%q", blank), func(t *testing.T) {
+			t.Setenv("HUSHSCRIPT_TOKEN", testToken)
+			t.Setenv("HUSHSCRIPT_BASE_URL", "https://env.example.test")
+			t.Setenv("HUSHSCRIPT_LOG", "debug")
+			c, err := New(WithToken(blank), WithBaseURL(blank), WithLogLevel(blank))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.core.cfg.token.reveal() != testToken {
+				t.Error("token did not fall back to environment")
+			}
+			if c.core.cfg.baseURL != "https://env.example.test" {
+				t.Errorf("base URL = %q", c.core.cfg.baseURL)
+			}
+			if c.core.cfg.logger == nil {
+				t.Error("log level did not fall back to debug")
+			}
+		})
+	}
+}
+
+func TestBlankStringEnvironmentFallsBack(t *testing.T) {
+	for _, blank := range []string{"", "   ", "\t", "\n\r", "\u2003\u00a0"} {
+		t.Run(fmt.Sprintf("%q", blank), func(t *testing.T) {
+			t.Setenv("HUSHSCRIPT_TOKEN", blank)
+			t.Setenv("HUSHSCRIPT_BASE_URL", blank)
+			t.Setenv("HUSHSCRIPT_LOG", blank)
+			_, err := New(WithToken(blank))
+			failure := asError(t, err)
+			assertCoreError(t, err, KindConfiguration, "config_invalid", 0)
+			if failure.Message != missingTokenMessage {
+				t.Errorf("message = %q", failure.Message)
+			}
+			if failure.Hint != missingTokenHint {
+				t.Errorf("hint = %q", failure.Hint)
+			}
+			c, err := New(WithToken(testToken), WithBaseURL(blank), WithLogLevel(blank))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.core.cfg.baseURL != defaultBaseURL {
+				t.Errorf("base URL = %q", c.core.cfg.baseURL)
+			}
+			if c.core.cfg.logger != nil {
+				t.Error("logging did not fall back to off")
+			}
+		})
+	}
+}
+
+func TestNonblankStringOptionsWinAndAreValidated(t *testing.T) {
+	t.Setenv("HUSHSCRIPT_TOKEN", "invalid")
+	t.Setenv("HUSHSCRIPT_BASE_URL", "invalid")
+	t.Setenv("HUSHSCRIPT_LOG", "invalid")
+	c, err := New(WithToken(testToken), WithBaseURL("https://option.example.test"), WithLogLevel("off"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.core.cfg.token.reveal() != testToken || c.core.cfg.baseURL != "https://option.example.test" || c.core.cfg.logger != nil {
+		t.Error("nonblank option lost precedence")
+	}
+	for _, tc := range []struct {
+		name    string
+		option  Option
+		message string
+	}{
+		{"token", WithToken(" " + testToken), "The token contains characters a Hushscript token never has (printable ASCII only)."},
+		{"base URL", WithBaseURL(" https://example.test"), "The base URL is not a valid URL."},
+		{"log level", WithLogLevel(" debug"), "The log level must be off or debug."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New(WithToken(testToken), WithBaseURL("https://example.test"), WithLogLevel("off"), tc.option)
+			assertCoreError(t, err, KindConfiguration, "config_invalid", 0)
+			failure := asError(t, err)
+			if failure.Message != tc.message || failure.Hint != "" {
+				t.Errorf("message = %q, hint = %q", failure.Message, failure.Hint)
+			}
+		})
+	}
+}
+
+func TestBlankOptionsStillValidateEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		name, variable, value, message string
+		option                         Option
+	}{
+		{"token", "HUSHSCRIPT_TOKEN", "sk-invalid", "This doesn't look like a Hushscript token.", WithToken("\t")},
+		{"base URL", "HUSHSCRIPT_BASE_URL", "http://example.test", "The base URL must be https, or http to localhost, 127.0.0.1 or [::1].", WithBaseURL("\t")},
+		{"log level", "HUSHSCRIPT_LOG", "invalid", "HUSHSCRIPT_LOG must be off or debug.", WithLogLevel("\t")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HUSHSCRIPT_TOKEN", testToken)
+			t.Setenv("HUSHSCRIPT_BASE_URL", "")
+			t.Setenv("HUSHSCRIPT_LOG", "")
+			t.Setenv(tc.variable, tc.value)
+			opts := []Option{tc.option}
+			_, err := New(opts...)
+			assertCoreError(t, err, KindConfiguration, "config_invalid", 0)
+			failure := asError(t, err)
+			if failure.Message != tc.message || failure.Hint != "" {
+				t.Errorf("message = %q, hint = %q", failure.Message, failure.Hint)
+			}
 		})
 	}
 }
