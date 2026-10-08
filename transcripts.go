@@ -1,7 +1,6 @@
 package hushscript
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"iter"
@@ -51,22 +50,6 @@ type deletedRow struct {
 	DeletedAt       int64          `json:"deleted_at"`
 	Cause           string         `json:"cause"`
 	Receipt         map[string]any `json:"receipt"`
-	raw             json.RawMessage
-}
-
-func (r *deletedRow) UnmarshalJSON(data []byte) error {
-	type fields deletedRow
-	return decodeKeepingRaw(data, (*fields)(r), &r.raw)
-}
-
-// rowsOf is the rows of a list answer, each as the API sent it. Callers have checked the body with
-// rowsHave, so it parses.
-func rowsOf(body []byte, key string) []json.RawMessage {
-	var root map[string]json.RawMessage
-	var rows []json.RawMessage
-	_ = json.Unmarshal(body, &root)
-	_ = json.Unmarshal(root[key], &rows)
-	return rows
 }
 
 // TranscriptsService is the friendly layer over the transcript endpoints: Client.Transcripts.
@@ -155,14 +138,16 @@ func (c *core) transcriptPage(ctx context.Context, cursor string, size int) (Pag
 	if !rowsHave(response.Body, "transcripts", "id", "created_at") {
 		return Page[TranscriptSummary]{}, c.badResponse(route, response.StatusCode())
 	}
-	rawRows := rowsOf(response.Body, "transcripts")
-	list := parsed
-	page := Page[TranscriptSummary]{NextCursor: valueOf(list.NextCursor), Items: make([]TranscriptSummary, len(list.Transcripts))}
-	for i := range list.Transcripts {
-		row := &list.Transcripts[i]
+	rows, raws, cursor, ok := listRows[generated.TranscriptListRow](response.Body, "transcripts")
+	if !ok {
+		return Page[TranscriptSummary]{}, c.badResponse(route, response.StatusCode())
+	}
+	page := Page[TranscriptSummary]{NextCursor: cursor, Items: make([]TranscriptSummary, len(rows))}
+	for i := range rows {
+		row := &rows[i]
 		summary := TranscriptSummary{
 			ID: row.Id, Title: row.Title, Language: valueOf(row.LanguageDetected), DurationSeconds: row.DurationSeconds,
-			CreatedAt: unixTime(int64(row.CreatedAt)), Tags: row.Tags, Raw: bytes.Clone(rawRows[i]),
+			CreatedAt: unixTime(int64(row.CreatedAt)), Tags: row.Tags, Raw: raws[i],
 		}
 		if summary.Tags == nil {
 			summary.Tags = []string{}
@@ -214,18 +199,15 @@ func (t TranscriptsService) Deleted(ctx context.Context) iter.Seq2[DeletedTransc
 		if !rowsHave(response.Body, "deleted", "id", "created_at", "deleted_at") {
 			return Page[DeletedTranscript]{}, core.badResponse(route, response.StatusCode())
 		}
-		var body struct {
-			Deleted    []deletedRow `json:"deleted"`
-			NextCursor *string      `json:"next_cursor"`
-		}
-		if json.Unmarshal(response.Body, &body) != nil {
+		rows, raws, cursor, ok := listRows[deletedRow](response.Body, "deleted")
+		if !ok {
 			return Page[DeletedTranscript]{}, core.badResponse(route, response.StatusCode())
 		}
-		page := Page[DeletedTranscript]{NextCursor: valueOf(body.NextCursor), Items: make([]DeletedTranscript, len(body.Deleted))}
-		for i, row := range body.Deleted {
+		page := Page[DeletedTranscript]{NextCursor: cursor, Items: make([]DeletedTranscript, len(rows))}
+		for i, row := range rows {
 			page.Items[i] = DeletedTranscript{
 				ID: row.ID, Title: row.Title, DurationSeconds: row.DurationSeconds, CreatedAt: unixTime(row.CreatedAt),
-				DeletedAt: unixTime(row.DeletedAt), Cause: row.Cause, Receipt: row.Receipt, Raw: row.raw,
+				DeletedAt: unixTime(row.DeletedAt), Cause: row.Cause, Receipt: row.Receipt, Raw: raws[i],
 			}
 		}
 		return page, nil

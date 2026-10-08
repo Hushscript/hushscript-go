@@ -691,3 +691,96 @@ func TestTranscriptRowsKeepTheirOwnRaw(t *testing.T) {
 		})
 	}
 }
+
+func TestListRowsComeFromTheExactKeyEachWithItsOwnRaw(t *testing.T) {
+	transcript := func(id, unknown string) string {
+		return `{"id":"` + id + `","title":"T","duration_seconds":5,"created_at":1760000000,"tags":[],` + unknown + `}`
+	}
+	deleted := func(id, unknown string) string {
+		return `{"id":"` + id + `","title":"T","duration_seconds":5,"created_at":1760000000,"deleted_at":1760000010,"cause":"manual",` + unknown + `}`
+	}
+	job := func(id string) string { return `{"id":"` + id + `","state":"done","created_at":1760000000}` }
+	a, b, c := transcript("tr_a", `"x_a":{"n":[1]}`), transcript("tr_b", `"x_b":"two","x_c":null`), transcript("tr_c", `"x_c":3`)
+	da, db, dc := deleted("tr_a", `"x_a":{"n":[1]}`), deleted("tr_b", `"x_b":"two","x_c":null`), deleted("tr_c", `"x_c":3`)
+	for _, tc := range []struct {
+		name                                string
+		transcripts, deletedBody            string
+		jobs                                string
+		wantRaw, wantDeletedRaw             []string
+		wantIDs, wantDeletedIDs, wantJobIDs []string
+	}{
+		{
+			name:        "rows with different unknown fields keep their own",
+			transcripts: `{"transcripts":[` + a + `,` + b + `,` + c + `],"next_cursor":null}`,
+			deletedBody: `{"deleted":[` + da + `,` + db + `,` + dc + `],"next_cursor":null}`,
+			jobs:        `{"jobs":[` + job("j1") + `,` + job("j2") + `],"next_cursor":null}`,
+			wantRaw:     []string{a, b, c}, wantDeletedRaw: []string{da, db, dc},
+			wantIDs: []string{"tr_a", "tr_b", "tr_c"}, wantDeletedIDs: []string{"tr_a", "tr_b", "tr_c"}, wantJobIDs: []string{"j1", "j2"},
+		},
+		{
+			name:        "a longer case variant of the key does not replace the rows that were checked",
+			transcripts: `{"transcripts":[` + a + `],"TRANSCRIPTS":[` + b + `,` + c + `],"next_cursor":null}`,
+			deletedBody: `{"deleted":[` + da + `],"DELETED":[` + db + `,` + dc + `],"next_cursor":null}`,
+			jobs:        `{"jobs":[` + job("j1") + `],"JOBS":[` + job("j2") + `,` + job("j3") + `],"next_cursor":null}`,
+			wantRaw:     []string{a}, wantDeletedRaw: []string{da},
+			wantIDs: []string{"tr_a"}, wantDeletedIDs: []string{"tr_a"}, wantJobIDs: []string{"j1"},
+		},
+		{
+			name:        "a shorter case variant does not replace them either",
+			transcripts: `{"transcripts":[` + a + `,` + b + `],"Transcripts":[` + c + `],"next_cursor":null}`,
+			deletedBody: `{"deleted":[` + da + `,` + db + `],"Deleted":[` + dc + `],"next_cursor":null}`,
+			jobs:        `{"jobs":[` + job("j1") + `,` + job("j2") + `],"Jobs":[` + job("j3") + `],"next_cursor":null}`,
+			wantRaw:     []string{a, b}, wantDeletedRaw: []string{da, db},
+			wantIDs: []string{"tr_a", "tr_b"}, wantDeletedIDs: []string{"tr_a", "tr_b"}, wantJobIDs: []string{"j1", "j2"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newListAPI(t, func(path string, _ url.Values) (int, string) {
+				switch path {
+				case "/v1/transcripts/deleted":
+					return 200, tc.deletedBody
+				case "/v1/jobs":
+					return 200, tc.jobs
+				}
+				return 200, tc.transcripts
+			})
+			client := api.client(t)
+			page, err := client.Transcripts.Page(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(page.Items) != len(tc.wantRaw) {
+				t.Fatalf("summaries = %d, want %d", len(page.Items), len(tc.wantRaw))
+			}
+			for i, item := range page.Items {
+				if item.ID != tc.wantIDs[i] || string(item.Raw) != tc.wantRaw[i] {
+					t.Errorf("summary %d = %s with Raw %s, want %s with Raw %s", i, item.ID, item.Raw, tc.wantIDs[i], tc.wantRaw[i])
+				}
+			}
+			rows, err := drain(client.Transcripts.Deleted(context.Background()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != len(tc.wantDeletedRaw) {
+				t.Fatalf("deleted = %d, want %d", len(rows), len(tc.wantDeletedRaw))
+			}
+			for i, row := range rows {
+				if row.ID != tc.wantDeletedIDs[i] || string(row.Raw) != tc.wantDeletedRaw[i] {
+					t.Errorf("deleted %d = %s with Raw %s, want %s with Raw %s", i, row.ID, row.Raw, tc.wantDeletedIDs[i], tc.wantDeletedRaw[i])
+				}
+			}
+			jobs, err := drain(client.Jobs.List(context.Background(), nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(jobs) != len(tc.wantJobIDs) {
+				t.Fatalf("jobs = %d, want %d", len(jobs), len(tc.wantJobIDs))
+			}
+			for i, listed := range jobs {
+				if listed.ID != tc.wantJobIDs[i] {
+					t.Errorf("job %d = %s, want %s", i, listed.ID, tc.wantJobIDs[i])
+				}
+			}
+		})
+	}
+}

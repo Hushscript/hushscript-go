@@ -166,16 +166,13 @@ func (j JobsService) List(ctx context.Context, opts *JobListOptions) iter.Seq2[J
 		if !rowsHave(response.Body, "jobs", "id", "state", "created_at") {
 			return Page[Job]{}, core.badResponse(route, response.StatusCode())
 		}
-		var body struct {
-			Jobs       []jobBody `json:"jobs"`
-			NextCursor *string   `json:"next_cursor"`
-		}
-		if json.Unmarshal(response.Body, &body) != nil {
+		rows, _, cursor, ok := listRows[jobBody](response.Body, "jobs")
+		if !ok {
 			return Page[Job]{}, core.badResponse(route, response.StatusCode())
 		}
-		page := Page[Job]{NextCursor: valueOf(body.NextCursor), Items: make([]Job, len(body.Jobs))}
-		for i := range body.Jobs {
-			page.Items[i] = *body.Jobs[i].job()
+		page := Page[Job]{NextCursor: cursor, Items: make([]Job, len(rows))}
+		for i := range rows {
+			page.Items[i] = *rows[i].job()
 		}
 		return page, nil
 	})
