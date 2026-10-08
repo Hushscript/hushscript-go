@@ -391,7 +391,23 @@ func (d *doer) networkFailure(class retryClass, req *http.Request, out outcome) 
 	if errors.Is(out.err, context.DeadlineExceeded) {
 		message = fmt.Sprintf("The request to the Hushscript API timed out after %s.", d.timeoutFor(req.Context()))
 	}
-	return newSDKError(KindNetwork, "network_error", message, out.err, d.cfg.redactor(), hintInputs{})
+	return newSDKError(KindNetwork, "network_error", message+" "+underlyingError(out.err), out.err, d.cfg.redactor(), hintInputs{})
+}
+
+// underlyingError names the error the transport returned: its Go type and its message. http.Client
+// wraps every RoundTripper error in a *url.Error, so the SDK cannot tell a transport failure from any
+// other error a caller's transport returns; naming the type is how the message stays honest about it.
+// The *url.Error itself is left out because its URL can carry a signature.
+func underlyingError(err error) string {
+	inner := err
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		inner = urlErr.Err
+	}
+	if text := inner.Error(); text != "" {
+		return fmt.Sprintf("%T: %s", inner, text)
+	}
+	return fmt.Sprintf("%T", inner)
 }
 
 // outcomeUnknown is the error for a claim, rotate or signup whose request was sent and whose answer

@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -1443,5 +1444,47 @@ func TestAZeroClientRefusesToTranscribe(t *testing.T) {
 		func() error { _, err := zero.Resume(context.Background(), "t", nil); return err }(),
 	} {
 		_ = wantCode(t, err, KindConfiguration, "config_invalid")
+	}
+}
+
+func TestNetworkFailureNamesUnderlyingErrorAndRedactsToken(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cause  error
+		detail string
+	}{
+		{"transport", errors.New("transport exploded"), "*errors.errorString: transport exploded"},
+		{"empty", errors.New(""), "*errors.errorString"},
+		{"token", errors.New("header " + testToken), "*errors.errorString: header hsr…[redacted]"},
+		{"secret tail", errors.New("echo " + strings.Split(testToken, ".")[2]), "*errors.errorString: echo hsr…[redacted]"},
+		{"dns", &net.DNSError{Err: "no such host", Name: "example.test"}, "*net.DNSError: lookup example.test: no such host"},
+		{"deadline", context.DeadlineExceeded, "context.deadlineExceededError: context deadline exceeded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := New(WithToken(testToken), WithMaxRetries(0), WithHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, tc.cause })}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = c.Transcripts.Page(context.Background(), nil)
+			assertCoreError(t, err, KindNetwork, "network_error", 0)
+			failure := asError(t, err)
+			prefix := "The request to the Hushscript API failed."
+			if tc.name == "deadline" {
+				prefix = "The request to the Hushscript API timed out after 1m0s."
+			}
+			if failure.Message != prefix+" "+tc.detail {
+				t.Errorf("message = %q, want %q", failure.Message, prefix+" "+tc.detail)
+			}
+			wantError := "hushscript: network_error: " + prefix + " " + tc.detail + " (cause: Get: " + c.core.cfg.redactor().apply(tc.cause.Error()) + ")"
+			if failure.Error() != wantError {
+				t.Errorf("error = %q, want %q", failure.Error(), wantError)
+			}
+			if !errors.Is(failure, tc.cause) {
+				t.Error("original cause identity lost")
+			}
+			if strings.Contains(failure.Error(), testToken) || strings.Contains(failure.Unwrap().Error(), testToken) {
+				t.Error("token leaked")
+			}
+		})
 	}
 }
