@@ -616,8 +616,14 @@ func TestTranscriptPageRejectsRepeatedNonemptyCursor(t *testing.T) {
 		cursor, next string
 		loop         bool
 	}{
-		{"same", "same", true}, {" ", " ", true}, {"\t", "\t", true}, {"\u2003", "\u2003", true},
-		{"", "", false}, {"", "next", false}, {"sent", "next", false}, {"sent", "", false},
+		{"same", "same", true},
+		{" ", " ", true},
+		{"\t", "\t", true},
+		{"\u2003", "\u2003", true},
+		{"", "", false},
+		{"", "next", false},
+		{"sent", "next", false},
+		{"sent", "", false},
 	} {
 		t.Run(fmt.Sprintf("%q/%q", tc.cursor, tc.next), func(t *testing.T) {
 			api := newListAPI(t, func(_ string, query url.Values) (int, string) {

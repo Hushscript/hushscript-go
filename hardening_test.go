@@ -308,9 +308,14 @@ func TestAZeroClientFormatsAndFailsEveryCallWithoutPanicking(t *testing.T) {
 
 func TestUserAgentToolchainVersions(t *testing.T) {
 	for _, tc := range []struct{ runtimeVersion, version string }{
-		{"go1.27.1", "1.27.1"}, {"go1.27.1-X:nodwarf5", "1.27.1"},
-		{"devel go1.28-abc +def", "1.28"}, {"devel +abc", "devel"}, {"", "devel"},
-		{" \t\u2003", "devel"}, {"go1.27", "1.27"}, {"go1", "devel"},
+		{"go1.27.1", "1.27.1"},
+		{"go1.27.1-X:nodwarf5", "1.27.1"},
+		{"devel go1.28-abc +def", "1.28"},
+		{"devel +abc", "devel"},
+		{"", "devel"},
+		{" \t\u2003", "devel"},
+		{"go1.27", "1.27"},
+		{"go1", "devel"},
 	} {
 		t.Run(tc.runtimeVersion, func(t *testing.T) {
 			t.Parallel()
