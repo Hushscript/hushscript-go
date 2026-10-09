@@ -57,7 +57,7 @@ jobs:
         env:
           MUTATION_FILE: ${{ matrix.file }}
           MUTATION_TIMEOUT: ${{ matrix.mutation_seconds }}
-        run: just mutation-shard "$MUTATION_FILE" counts 1.25
+        run: just mutation-shard "$MUTATION_FILE" counts 1.26
       - name: Upload the shard counts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -13,6 +14,63 @@ import (
 	"testing"
 	"time"
 )
+
+func TestPurchaseKeepsItsKeyUnlessEveryAttemptWasUnsent(t *testing.T) {
+	setup := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+	lost := errors.New("response lost")
+	for _, token := range []string{testToken, "hsr1:agent:pat.0123456789abcdef.0123456789abcdef"} {
+		for _, tc := range []struct {
+			name    string
+			first   error
+			status  int
+			cancel  bool
+			wantKey bool
+		}{
+			{name: "all setup failures", first: setup},
+			{name: "lost response then setup failure", first: lost, wantKey: true},
+			{name: "503 then setup failure", status: 503, wantKey: true},
+			{name: "cancelled before purchase", cancel: true},
+		} {
+			t.Run(token[:10]+"/"+tc.name, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				calls := 0
+				transport := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Method == http.MethodGet {
+						if tc.cancel {
+							cancel()
+						}
+						return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(defaultCard))}, nil
+					}
+					calls++
+					if calls == 1 {
+						if tc.status != 0 {
+							return &http.Response{StatusCode: tc.status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+						}
+						return nil, tc.first
+					}
+					return nil, setup
+				})}
+				c := newTestClient(t, "http://127.0.0.1:1", newFakeClock(), WithToken(token), WithHTTPClient(transport))
+				_, err := c.Buy(ctx, "45min", &BuyOptions{IdempotencyKey: "purchase-key"})
+				e := asError(t, err)
+				if (e.IdempotencyKey == "purchase-key") != tc.wantKey {
+					t.Errorf("key = %q, want preserved=%v", e.IdempotencyKey, tc.wantKey)
+				}
+				if strings.Contains(e.Message, "before the request was sent") == tc.wantKey {
+					t.Errorf("message = %q, want unsent=%v", e.Message, !tc.wantKey)
+				}
+				wantCalls := 2
+				if tc.cancel {
+					wantCalls = 0
+				}
+				if calls != wantCalls {
+					t.Errorf("purchase attempts = %d, want %d", calls, wantCalls)
+				}
+			})
+		}
+	}
+}
 
 // routeServer answers every request through one handler and records them all, headers and bodies
 // included. A step with drop closes the connection after the request was read.

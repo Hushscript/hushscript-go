@@ -11,10 +11,47 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  require-ci:
+    name: require successful CI on this commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      actions: read # query CI workflow runs for this release commit
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
+        with:
+          egress-policy: block
+          allowed-endpoints: api.github.com:443
+      - name: Wait for CI on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ github.sha }}
+        # Main's CI concurrency can cancel this run. A cancellation fails publishing;
+        # the owner must re-run CI before re-running the publish workflow.
+        run: |
+          deadline=$((SECONDS + 3540))
+          while (( SECONDS < deadline )); do
+            run="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&head_sha=$COMMIT&per_page=100" --jq '.workflow_runs | sort_by(.id) | last | {status, conclusion}')"
+            status="$(jq -r '.status // ""' <<< "$run")"
+            conclusion="$(jq -r '.conclusion // ""' <<< "$run")"
+            if [ "$status" = "completed" ]; then
+              if [ "$conclusion" = "success" ]; then
+                exit 0
+              fi
+              echo "ci on commit $COMMIT concluded $conclusion; publishing is blocked" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "timed out waiting for ci on commit $COMMIT" >&2
+          exit 1
+
   # Builds the source archive and the SBOM with read-only permissions and no OIDC token: nothing that
   # runs here can mint an attestation.
   build:
     name: build the source archive
+    needs: require-ci
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -44,12 +81,17 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - name: Check the tag against the release manifest and main
         env:
           TAG: ${{ github.event.release.tag_name }}
+          COMMIT: ${{ github.sha }}
         run: |
+          if [ "$(git rev-parse --verify "refs/tags/$TAG^{commit}")" != "$COMMIT" ]; then
+            echo "the release tag no longer points to the commit verified by CI" >&2
+            exit 1
+          fi
           version="$(jq -r '."."' .release-please-manifest.json)"
           if [ "$TAG" != "v$version" ]; then
             echo "release tag $TAG does not match the manifest version v$version" >&2

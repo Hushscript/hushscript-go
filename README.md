@@ -39,7 +39,7 @@ func main() {
 }
 ```
 
-Requires Go 1.25 or newer. Server-side use only: a token must never ship in a browser bundle.
+Requires Go 1.26.9 or newer. Server-side use only: a token must never ship in a browser bundle.
 
 Options that can be off, on or unset are `*bool`. `hushscript.Bool(false)` and `hushscript.Bool(true)`
 build one, and nil keeps the default:
@@ -118,8 +118,9 @@ so read them from `pack.Price` and never hard-code one. `Price.Formatted` divide
 digits of Stripe's currency table, not by locale data.
 
 `Buy` charges your saved default card, or the only card that can be charged when there is no
-default, and returns a `Purchase`: the `Seconds` and `Minutes` you have after it settled. It makes no
-request after the charge, so nothing can fail once the money has moved. With no usable card it
+default, and returns a `Purchase`: the `Seconds` and `Minutes` from the purchase response, without a
+follow-up request. A lost or unusable response can still return an error after payment; retry with
+the `IdempotencyKey` attached to that error. With no usable card it
 returns a `KindPaymentMethodRequired` error and sends nothing: `no_default_card` when there is none
 (add one at the URL from `client.Billing.AddCardURL`, or in the app), `default_card_required` when
 several cards could be charged and none is the default (pick one with
@@ -424,7 +425,7 @@ minutes of the recording; medical mode and each translation target use more. Cur
 
 ## Requirements
 
-Go 1.25 or newer.
+Go 1.26.9 or newer.
 
 ## Links
 
@@ -446,7 +447,7 @@ all three to the GitHub release. `proxy.golang.org` is asked for the new version
 Everything runs in containers; the host needs only `just` and Docker.
 
 ```sh
-just ci        # lint, then test and conformance on Go 1.25 and 1.27, then examples and build
+just ci        # lint, then test and conformance on Go 1.26 and 1.27, then examples and build
 just test      # unit tests with the race detector and the 85% coverage floor
 just examples  # every program in examples/ against the conformance mock
 just regen     # regenerate openapi.json and generated/ from the production spec

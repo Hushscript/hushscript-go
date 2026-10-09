@@ -5,12 +5,48 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/Hushscript/hushscript-go/generated"
 )
+
+func TestSourceUploadAndAbortWrappersNameTheirRedactedCause(t *testing.T) {
+	c := newTestClient(t, "http://127.0.0.1:1", newFakeClock())
+	cause := errors.New("read " + testToken + " https://storage.example/part?signature=secret")
+	u := &uploader{core: c.core, red: c.core.cfg.redactor()}
+	u.mode.Store(modeDirect)
+	inner := newSDKError(KindNetwork, "network_error", "Part failed.", cause, c.core.cfg.redactor(), hintInputs{})
+	for name, err := range map[string]error{
+		"http abort":      newDoer(c.core.cfg).aborted(cause),
+		"wait abort":      c.core.abortError(cause),
+		"file unreadable": fileUnreadable(c.core.cfg.redactor(), "The file could not be opened.", cause),
+		"source read":     newStreamSource(iotest.ErrReader(cause), 1).readPart(make([]byte, 1), 0, c.core.cfg.redactor()),
+		"parts exhausted": u.recover(context.Background(), inner, 1, "", &directState{refetched: true}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := asError(t, err)
+			wantType := fmt.Sprintf("%T", cause)
+			if name == "parts exhausted" {
+				wantType = "*hushscript.Error"
+			}
+			if !strings.Contains(e.Message, wantType) || !strings.Contains(e.Message, "https://storage.example/part?[redacted]") {
+				t.Errorf("message lacks cause type or redacted URL: %q", e.Message)
+			}
+			if strings.Contains(e.Message, testToken) || strings.Contains(e.Unwrap().Error(), "signature=secret") || !errors.Is(e, cause) {
+				t.Errorf("cause was leaked or lost: %v", e)
+			}
+		})
+	}
+	_, err := openPath(t.TempDir()+"/missing", redactor{})
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) || !errors.Is(err, os.ErrNotExist) || !strings.Contains(asError(t, err).Message, "*fs.PathError") {
+		t.Errorf("file error lost its type or cause: %v", err)
+	}
+}
 
 func asText(v any) string { return fmt.Sprintf("%v", v) }
 
