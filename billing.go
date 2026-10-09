@@ -268,10 +268,10 @@ func (c *core) chooseCard(cards *Cards) (string, *Error) {
 }
 
 // Buy buys a pack with the default card, or the only card that can be charged when there is no
-// default, and returns the balance the purchase answer reports. It makes no request after the charge,
-// so nothing can fail once the money has moved. Every error raised after the purchase request was sent
-// carries IdempotencyKey; pass it back in BuyOptions to ask again with no chance of a second charge. A
-// nil opts uses the defaults.
+// default, and returns the balance the purchase answer reports, without a follow-up request.
+// A lost or unusable response can still return an error after payment. Every error raised after
+// the purchase request was sent carries IdempotencyKey; pass it back in BuyOptions to ask again
+// with no chance of a second charge. A nil opts uses the defaults.
 func (b BillingService) Buy(ctx context.Context, pack string, opts *BuyOptions) (*Purchase, error) {
 	if b.core == nil {
 		return nil, newConfigError(notBuiltMessage)
@@ -295,12 +295,20 @@ func (b BillingService) Buy(ctx context.Context, pack string, opts *BuyOptions) 
 	if choiceErr != nil {
 		return nil, choiceErr
 	}
-	ann.key = key // from here on the purchase may have reached the server
+	state := &purchaseState{}
+	ctx = context.WithValue(ctx, purchaseStateKey{}, state)
 	purchase, err := core.purchase(ctx, generated.BuyMinutesJSONRequestBody{
 		Pack: pack, IdempotencyKey: key, QuickPaymentMethodId: card, PolicyAck: &opts.AcknowledgeNoRefund,
 	})
 	if err != nil {
-		return nil, ann.annotate(ctx, err)
+		if state.mayHaveSent {
+			ann.key = key
+		}
+		failure := ann.annotate(ctx, err)
+		if sdkErr, ok := failure.(*Error); ok && !state.mayHaveSent { //nolint:errorlint // annotate returns its own error unwrapped
+			sdkErr.Message += " The purchase failed before the request was sent."
+		}
+		return nil, failure
 	}
 	return purchase, nil
 }

@@ -266,6 +266,8 @@ func newSDKError(kind ErrorKind, code, message string, cause error, r redactor, 
 		e.cause = newRedactedCause(cause, r)
 		if kind == KindNetwork || kind == KindOutcomeUnknown {
 			e.causeText = r.apply(causeSummary(cause))
+		} else if detail := r.apply(underlyingError(cause)); !strings.Contains(e.Message, detail) {
+			e.Message += " " + detail
 		}
 	}
 	e.Hint = r.apply(renderHint(code, inputs))

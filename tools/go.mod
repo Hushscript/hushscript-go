@@ -1,6 +1,6 @@
 module github.com/Hushscript/hushscript-go/tools
 
-go 1.25.0
+go 1.26.9
 
 tool (
 	github.com/avito-tech/go-mutesting/cmd/go-mutesting

@@ -52,7 +52,12 @@ type (
 	retryClassKey     struct{}
 	attemptTimeoutKey struct{}
 	directStorageKey  struct{}
+	purchaseStateKey  struct{}
 )
+
+type purchaseState struct {
+	mayHaveSent bool
+}
 
 // partTimeout is the per-attempt timeout of an upload part, direct or proxied (spec section 3).
 const partTimeout = 300 * time.Second
@@ -144,6 +149,9 @@ func (d *doer) Do(req *http.Request) (*http.Response, error) {
 			}
 		}
 		out := d.attempt(ctx, req, class)
+		if purchase, ok := ctx.Value(purchaseStateKey{}).(*purchaseState); ok {
+			purchase.mayHaveSent = purchase.mayHaveSent || out.sent
+		}
 		record := attempt{method: req.Method, path: label, number: number, duration: out.took}
 
 		if out.err != nil {

@@ -15,6 +15,56 @@ import (
 	"time"
 )
 
+func TestPurchaseFailureWhileBackingOffPreservesWhetherAnAttemptWasSent(t *testing.T) {
+	for _, sent := range []bool{false, true} {
+		t.Run(fmt.Sprint(sent), func(t *testing.T) {
+			state := &purchaseState{}
+			ctx := context.WithValue(context.Background(), purchaseStateKey{}, state)
+			failure := error(&net.OpError{Op: "dial", Err: errors.New("connection refused")})
+			if sent {
+				failure = errors.New("connection reset")
+			}
+			var calls atomic.Int32
+			c := newTestClient(t, "http://127.0.0.1:1", cancellingClock{newFakeClock()}, WithHTTPClient(failingAfterBody(&calls, failure)))
+			_, err := doContext(ctx, t, c, http.MethodPost, "/v1/billing/purchase", `{}`)
+			if asError(t, err).Kind != KindAbort || state.mayHaveSent != sent || calls.Load() != 1 {
+				t.Errorf("error=%v sent=%v calls=%d", err, state.mayHaveSent, calls.Load())
+			}
+		})
+	}
+}
+
+func TestPurchaseBodyReplayFailureDoesNotEraseAnEarlierSentAttempt(t *testing.T) {
+	for _, sent := range []bool{false, true} {
+		t.Run(fmt.Sprint(sent), func(t *testing.T) {
+			state := &purchaseState{}
+			ctx := context.WithValue(context.Background(), purchaseStateKey{}, state)
+			failure := errors.New("body could not be reopened")
+			var calls atomic.Int32
+			c := newTestClient(t, "http://127.0.0.1:1", newFakeClock(), WithHTTPClient(failingAfterBody(&calls, errors.New("response lost"))))
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://127.0.0.1:1/v1/billing/purchase", strings.NewReader(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			bodies := 0
+			req.GetBody = func() (io.ReadCloser, error) {
+				bodies++
+				if sent && bodies == 1 {
+					return io.NopCloser(strings.NewReader(`{}`)), nil
+				}
+				return nil, failure
+			}
+			response, err := c.core.doer.Do(req)
+			if response != nil {
+				_ = response.Body.Close()
+			}
+			if !errors.Is(err, failure) || state.mayHaveSent != sent {
+				t.Errorf("error=%v sent=%v, want sent=%v", err, state.mayHaveSent, sent)
+			}
+		})
+	}
+}
+
 // failingAfterBody is a transport that is not an http.Transport, so no connection hook ever fires for
 // it. It reads the whole request body, as a transport does when it writes it, then fails.
 func failingAfterBody(calls *atomic.Int32, failure error) *http.Client {

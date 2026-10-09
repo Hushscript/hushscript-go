@@ -9,7 +9,7 @@ cd "$dir"
 cat > go.mod <<MOD
 module example.test/consumer
 
-go 1.25.0
+go 1.26.9
 
 require github.com/Hushscript/hushscript-go v0.0.0
 
