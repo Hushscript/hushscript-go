@@ -1,0 +1,8 @@
+# typos 1.50.3, pinned by hash (pip install --require-hashes). Every Linux wheel of the release, so
+# any builder architecture works; the sdist is left out on purpose, since building it needs a Rust toolchain.
+typos==1.50.3 \
+    --hash=sha256:7873bf6f5deac401d7bc13c79868a6a56ba6fca38a33a92d07eebba2e6564fbd \
+    --hash=sha256:113b1c9f9fb2b6af7824157341bbbe266e8ff1c15c402b3ba166dd357a0e8d84 \
+    --hash=sha256:c26ab14bad1464c9c8931db5e4ca4d1864c00f47362e4ce5ce1f8627074eb524 \
+    --hash=sha256:75368d9e68dd86856f7306e3eae949ac54cb1a6ea49a38fe94ffe16dbd0a7276 \
+    --hash=sha256:696fa3cbff5f5e2f6e4a71cbb02ab6c21cd4fc708df6cae2523f9e1ebc7e0f59

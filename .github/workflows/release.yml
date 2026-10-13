@@ -1,0 +1,203 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: release-please
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {} # every write goes through the App token below
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      sha: ${{ steps.release.outputs.sha }}
+      id: ${{ steps.release.outputs.id }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+      - name: Create the App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          # No fallback: a missing secret fails here. A release created with the default token would
+          # not start the workflows that listen for releases, so the App token is required.
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write # create the draft release
+          permission-pull-requests: write # open and update the release PR
+          permission-issues: write # release-please manages its autorelease labels
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  publish-release:
+    name: check and publish the frozen draft candidate
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      actions: read # CI queries only; release writes use the App token
+    outputs:
+      release_created: ${{ steps.publish.outputs.release_created }}
+      tag_name: ${{ steps.publish.outputs.tag_name }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+      - name: Create the App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write # read the draft, create the checked tag and publish
+      - name: Verify exact-candidate CI, tag and publish the same draft
+        id: publish
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          CI_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.release-please.outputs.id }}
+          COMMIT: ${{ needs.release-please.outputs.sha }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          node --input-type=commonjs <<'NODE'
+          (async () => {
+            const {GH_TOKEN, CI_TOKEN, GITHUB_REPOSITORY, RELEASE_ID, COMMIT, TAG, GITHUB_OUTPUT} = process.env;
+            const fs = require('node:fs');
+            if (!/^[1-9][0-9]*$/.test(RELEASE_ID) || !/^[0-9a-f]{40}$/.test(COMMIT) ||
+                !/^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(TAG)) {
+              throw new Error('Invalid frozen release candidate');
+            }
+            const base = `https://api.github.com/repos/${GITHUB_REPOSITORY}`;
+            async function api(path, {method = 'GET', body, token = GH_TOKEN, allow = []} = {}) {
+              const response = await fetch(`${base}/${path}`, {
+                method,
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  Accept: 'application/vnd.github+json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+                  ...(body ? {'Content-Type': 'application/json'} : {}),
+                },
+                ...(body ? {body: JSON.stringify(body)} : {}),
+                signal: AbortSignal.timeout(30000),
+              });
+              if (allow.includes(response.status)) return null;
+              if (!response.ok) throw new Error(`GitHub API ${method} ${path}: ${response.status}`);
+              return response.json();
+            }
+            async function candidate() {
+              const release = await api(`releases/${RELEASE_ID}`);
+              if (String(release.id) !== RELEASE_ID || release.target_commitish !== COMMIT ||
+                  release.tag_name !== TAG || release.draft !== true) {
+                throw new Error('Draft release no longer matches the frozen id, SHA and tag');
+              }
+              return release;
+            }
+            await candidate();
+            const manifest = await api(`contents/.release-please-manifest.json?ref=${COMMIT}`);
+            const version = JSON.parse(Buffer.from(manifest.content, 'base64').toString('utf8'))['.'];
+            if (TAG !== `v${version}`) throw new Error('Tag does not match the candidate manifest');
+            const comparison = await api(`compare/${COMMIT}...main`);
+            if (!['ahead', 'identical'].includes(comparison.status)) {
+              throw new Error('Candidate is not on main');
+            }
+            // Wait at most 50 minutes so the App token remains valid through publication.
+            const deadline = Date.now() + 3000000;
+            let passed = false;
+            while (Date.now() < deadline) {
+              const result = await api(`actions/workflows/ci.yml/runs?event=push&head_sha=${COMMIT}&per_page=100`, {token: CI_TOKEN});
+              const runs = result.workflow_runs.filter(run =>
+                run.head_sha === COMMIT && run.event === 'push' && run.head_branch === 'main');
+              const latest = runs.sort((a, b) => b.id - a.id)[0];
+              if (latest?.status === 'completed') {
+                if (latest.conclusion !== 'success') throw new Error(`Candidate CI concluded ${latest.conclusion}`);
+                passed = true;
+                break;
+              }
+              await new Promise(resolve => setTimeout(resolve, 30000));
+            }
+            if (!passed) throw new Error('Timed out waiting for exact-candidate CI');
+            // Re-read the same draft after waiting; never resolve a branch as the tag target.
+            await candidate();
+            const refPath = `git/ref/tags/${TAG}`;
+            const ref = await api(refPath, {allow: [404]});
+            if (!ref) {
+              // A concurrent creator may return 422. In either case, verify the stored ref.
+              await api('git/refs', {method: 'POST', body: {ref: `refs/tags/${TAG}`, sha: COMMIT}, allow: [422]});
+            }
+            async function verifyTag() {
+              const stored = await api(refPath);
+              if (stored.ref !== `refs/tags/${TAG}` || stored.object.type !== 'commit' || stored.object.sha !== COMMIT) {
+                throw new Error('Existing tag does not point directly to the checked candidate');
+              }
+            }
+            await verifyTag();
+            await candidate();
+            const published = await api(`releases/${RELEASE_ID}`, {
+              method: 'PATCH', body: {draft: false, tag_name: TAG, target_commitish: COMMIT},
+            });
+            if (String(published.id) !== RELEASE_ID || published.draft !== false ||
+                published.target_commitish !== COMMIT || published.tag_name !== TAG) {
+              throw new Error('Published release differs from the checked candidate');
+            }
+            await verifyTag();
+            fs.appendFileSync(GITHUB_OUTPUT, `release_created=true\ntag_name=${TAG}\n`);
+          })().catch(error => { console.error(error.message); process.exitCode = 1; });
+          NODE
+
+  # A Go module is "published" by its tag. The first fetch through the proxy caches the version, and
+  # makes it appear on pkg.go.dev, so this step asks for it after the release is public.
+  warm-proxy:
+    name: warm proxy.golang.org
+    needs: publish-release
+    if: needs.publish-release.outputs.release_created == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            proxy.golang.org:443
+      - name: Fetch the new version through the module proxy
+        env:
+          TAG: ${{ needs.publish-release.outputs.tag_name }}
+        run: |
+          # The proxy encodes capital letters in module paths as "!" and the lower-case letter.
+          url="https://proxy.golang.org/github.com/!hushscript/hushscript-sdk-go/@v/${TAG}.info"
+          for attempt in 1 2 3 4 5 6; do
+            if curl --fail --silent --show-error --location --max-time 60 "$url"; then
+              echo
+              exit 0
+            fi
+            echo "attempt $attempt: the proxy does not know $TAG yet" >&2
+            sleep 20
+          done
+          echo "proxy.golang.org still does not serve $TAG" >&2
+          exit 1

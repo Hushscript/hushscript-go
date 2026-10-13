@@ -1,0 +1,119 @@
+name: regenerate
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: regenerate
+  cancel-in-progress: true
+
+jobs:
+  regenerate:
+    name: sync with the api spec
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read # the push and the PR go through the App token below
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            raw.githubusercontent.com:443
+            proxy.golang.org:443
+            sum.golang.org:443
+            vuln.go.dev:443
+            api.hushscript.com:443
+            ghcr.io:443
+            pkg-containers.githubusercontent.com:443
+            registry-1.docker.io:443
+            auth.docker.io:443
+            production.cloudflare.docker.com:443
+            production.cloudfront.docker.com:443
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      - name: Fetch the spec and compare it with the committed one
+        id: fetch
+        run: |
+          curl --fail --silent --show-error --location --max-time 60 \
+            https://api.hushscript.com/openapi.json --output "$RUNNER_TEMP/openapi.new.json"
+          if [ "$(jq -S . openapi.json | sha256sum)" = "$(jq -S . "$RUNNER_TEMP/openapi.new.json" | sha256sum)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "The spec is unchanged."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Look for breaking changes
+        id: oasdiff
+        if: steps.fetch.outputs.changed == 'true'
+        run: |
+          mkdir "$RUNNER_TEMP/specs"
+          cp openapi.json "$RUNNER_TEMP/specs/old.json"
+          cp "$RUNNER_TEMP/openapi.new.json" "$RUNNER_TEMP/specs/new.json"
+          status=0
+          docker run --rm --init --network none --user "$(id -u):$(id -g)" -v "$RUNNER_TEMP/specs":/specs:ro \
+            tufin/oasdiff:v1.33.0@sha256:6263a96dd2ef0726c54e21fea9b8e1607eac4841add0079324b424c1f52b819c \
+            breaking /specs/old.json /specs/new.json --fail-on ERR > "$RUNNER_TEMP/oasdiff.txt" || status=$?
+          case "$status" in
+            0) breaking=false; title='feat: sync with api spec' ;;
+            1) breaking=true; title='feat!: sync with api spec' ;;
+            *) echo "oasdiff failed with status $status" >&2; exit "$status" ;;
+          esac
+          {
+            echo "The API spec changed. Output of \`oasdiff breaking\`:"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/oasdiff.txt"
+            echo '```'
+          } > "$RUNNER_TEMP/pr-body.md"
+          echo "breaking=$breaking" >> "$GITHUB_OUTPUT"
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+      - name: Regenerate
+        if: steps.fetch.outputs.changed == 'true'
+        run: just regen "$RUNNER_TEMP/openapi.new.json"
+      - name: Check that only the spec and the generated files changed
+        if: steps.fetch.outputs.changed == 'true'
+        run: scripts/check-regen-diff.sh
+      - name: Run just ci
+        if: steps.fetch.outputs.changed == 'true'
+        run: just ci
+      - name: Create the App token
+        id: app-token
+        if: steps.fetch.outputs.changed == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write # push the regen/spec branch
+          permission-pull-requests: write # open or update the PR
+      - name: Open or update the pull request
+        if: steps.fetch.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          # The App token makes ci.yml run on the PR, and sign-commits has the API sign the commit
+          # as the App (branch protection requires signed commits).
+          token: ${{ steps.app-token.outputs.token }}
+          sign-commits: true
+          branch: regen/spec
+          title: ${{ steps.oasdiff.outputs.title }}
+          commit-message: ${{ steps.oasdiff.outputs.title }}
+          body-path: ${{ runner.temp }}/pr-body.md
+          add-paths: |
+            openapi.json
+            generated
+          delete-branch: true
