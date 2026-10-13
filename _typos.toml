@@ -1,5 +1,5 @@
 [files]
-extend-exclude = ["openapi.json", "go.mod", "go.sum", "generated/**", "LICENSE"]
+extend-exclude = ["openapi.json", "go.mod", "go.sum", "generated/**", "LICENSE", "CHANGELOG.md"]
 
 [default.extend-words]
 JOD = "JOD"
