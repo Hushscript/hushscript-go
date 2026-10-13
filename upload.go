@@ -755,7 +755,7 @@ func (p *partPages) urlFor(ctx context.Context, n int) (signedURL string, direct
 		default:
 			return page.urls[n].reveal(), true, nil
 		}
-		stillNeeded := func() bool { return p.direct && p.pageOf(n) == page && p.next == next }
+		stillNeeded := func() bool { return p.direct && p.pageOf(n) == page && (page != nil || p.next == next) }
 		if fetchErr := p.fetchPage(ctx, start, stillNeeded); fetchErr != nil {
 			return "", false, fetchErr
 		}
@@ -773,8 +773,6 @@ func (p *partPages) refresh(ctx context.Context, n int, stale string) error {
 	}
 	start := page.start
 	p.mu.Unlock()
-	return p.fetchPage(ctx, start, func() bool {
-		current := p.pageOf(n)
-		return current != nil && current.urls[n].reveal() == stale
-	})
+	// A refetch can sign the same URL again, so "already refreshed" is a new page, not a new string.
+	return p.fetchPage(ctx, start, func() bool { return p.pageOf(n) == page })
 }
