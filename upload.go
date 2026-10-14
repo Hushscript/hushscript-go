@@ -646,8 +646,10 @@ func (p *partPages) pageOf(n int) *urlPage {
 	return nil
 }
 
-// fetchPage makes one request per page start, however many parts wait for it.
-func (p *partPages) fetchPage(ctx context.Context, start int) error {
+// fetchPage makes one request per page start, however many parts wait for it. needed runs under the
+// lock: when a fetch completed after the caller read its state and the page is no longer needed, there
+// is no request.
+func (p *partPages) fetchPage(ctx context.Context, start int, needed func() bool) error {
 	p.mu.Lock()
 	if running, ok := p.inflight[start]; ok {
 		p.mu.Unlock()
@@ -657,6 +659,10 @@ func (p *partPages) fetchPage(ctx context.Context, start int) error {
 		case <-ctx.Done():
 			return p.core.abortError(ctx.Err())
 		}
+	}
+	if !needed() {
+		p.mu.Unlock()
+		return nil
 	}
 	fetch := &pageFetch{done: make(chan struct{})}
 	p.inflight[start] = fetch
@@ -749,7 +755,8 @@ func (p *partPages) urlFor(ctx context.Context, n int) (signedURL string, direct
 		default:
 			return page.urls[n].reveal(), true, nil
 		}
-		if fetchErr := p.fetchPage(ctx, start); fetchErr != nil {
+		stillNeeded := func() bool { return p.direct && p.pageOf(n) == page && (page != nil || p.next == next) }
+		if fetchErr := p.fetchPage(ctx, start, stillNeeded); fetchErr != nil {
 			return "", false, fetchErr
 		}
 	}
@@ -766,5 +773,6 @@ func (p *partPages) refresh(ctx context.Context, n int, stale string) error {
 	}
 	start := page.start
 	p.mu.Unlock()
-	return p.fetchPage(ctx, start)
+	// A refetch can sign the same URL again, so "already refreshed" is a new page, not a new string.
+	return p.fetchPage(ctx, start, func() bool { return p.pageOf(n) == page })
 }
