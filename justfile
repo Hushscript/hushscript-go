@@ -141,8 +141,10 @@ build version=floor:
       old="$(mktemp -d)"
       trap 'rm -rf "$old"' EXIT
       git archive "$last" | tar -x -C "$old"
+      # The image caches only the current module graph (GOPROXY=off), so the old
+      # source is built against today's go.mod/go.sum, as an upgrading consumer would.
       docker run {{sandbox}} --network none --user "$user" -e GOPROXY=off --tmpfs /tmp:exec,size=3g -v "$old":/old:ro "hushscript-sdk-go-dev:go{{version}}" \
-        sh -c 'cd /old && old_module="$(go list -m)" && go tool -modfile=/work/tools/go.mod apidiff -m -w /tmp/old.export "$old_module" && cd /work && go tool -modfile=tools/go.mod apidiff -m -incompatible /tmp/old.export github.com/Hushscript/hushscript-sdk-go'
+        sh -c 'cp -r /old /tmp/old-src && cp /work/go.mod /work/go.sum /tmp/old-src/ && cd /tmp/old-src && old_module="$(go list -m)" && go tool -modfile=/work/tools/go.mod apidiff -m -w /tmp/old.export "$old_module" && cd /work && go tool -modfile=tools/go.mod apidiff -m -incompatible /tmp/old.export github.com/Hushscript/hushscript-sdk-go'
     fi
 
 # regenerate openapi.json and generated/ from the production spec, or from a local spec file (outbound network)
