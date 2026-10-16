@@ -278,6 +278,9 @@ func newLeakRig(t *testing.T) *leakRig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = resp.Body.Close() })
+	// Raw reflection must not inspect the transport's concurrently changing cancellation state.
+	printedResp := *resp
+	printedResp.Request = resp.Request.Clone(context.Background())
 	peerResp := &http.Response{Status: "other"}
 
 	pages := newPartPages(c.core, "j1", &uploadPlan{urls: []partURL{{n: 1, url: newSecret(signedPartURL)}}})
@@ -297,7 +300,7 @@ func newLeakRig(t *testing.T) *leakRig {
 		"Agent pointer":                 {&c.Agent, &peer.Agent},
 		"API":                           {c.API(), peer.API()},
 		"API client interface":          {c.API().ClientInterface, peer.API().ClientInterface},
-		"API response":                  {resp, peerResp},
+		"API response":                  {&printedResp, peerResp},
 		"core":                          {c.core, peer.core},
 		"doer":                          {c.core.doer, peer.core.doer},
 		"config":                        {c.core.cfg, peer.core.cfg},
