@@ -9,3 +9,7 @@ rules:
       - release.yml
       # A publish run must finish: cancelling it halfway can leave a release without its attestation.
       - publish.yml
+  superfluous-actions:
+    ignore:
+      # create-pull-request also updates the existing regeneration PR and its branch.
+      - regenerate.yml
